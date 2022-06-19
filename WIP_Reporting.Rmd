@@ -1,0 +1,1702 @@
+---
+title: ''
+output:
+  html_document:
+    highlight: kate
+    theme: simplex
+    toc: no
+    toc_float:
+      collapsed: no
+editor_options: 
+  chunk_output_type: inline
+---
+
+<body style="background-color:#002A52;">
+
+```{r pressure, echo=FALSE, out.width = '35%', out.height='35%', fig.align='center'}
+
+knitr::include_graphics("MAST/CBVA_logo.jpg")
+
+```
+<h2><span style="color: white;">CBVA Financial Reporting FY22</span></h2>
+
+```{css, echo=FALSE}
+h3
+{
+ color: white;
+}
+```
+
+<style>
+.nav>li>a {
+    position: relative;
+    display: block;
+    padding: 10px 15px;
+    color: white;
+}
+.nav-pills>li.active>a, .nav-pills>li.active>a:hover, .nav-pills>li.active>a:focus {
+    color: #002A52;
+    background-color: #CDB98F;
+}
+</style>
+
+```{r init, echo=FALSE, message=FALSE, warning=FALSE}
+
+options(warn=-1)
+options(tidyverse.quiet = TRUE)
+options(DBI.quiet = TRUE)
+source("C:/Users/Blake/Documents/CBVA/Finance/Utilities.R")
+
+# Load a table of membership fee categories and effective / expiry dates
+membership.ref <- read_csv("C:/Users/Blake/Documents/CBVA/Finance/MAST/membership.csv")
+
+```
+
+```{r bankTran, echo=FALSE, warning=FALSE, message=FALSE}
+
+func_prepBankTran <- function(start_d, end_d) {
+
+  bank.tran <- func_getTibble(paste0("
+  select tran_date
+  , descr
+  , dr
+  , cr
+  , bal
+  , tran_id
+  , map_cat_cr
+  , map_cat_dr
+  , rpt_perd
+  from bank.tran
+  where tran_date >= '", start_d, "'
+  and tran_date <= '", end_d, "'"))
+  
+  # Exclude manually adjusted transactions
+  tran.tran <- bank.tran %>% 
+    # Exclude manual transactions
+    filter(!tran_id %in% unique(bank.tran.manual$tran_id)) %>% 
+    # Exclude other source transactions
+    filter(!map_cat_cr %in% c('REVSPORT', 'PAYPAL')) %>% 
+    # We shouldn't see any debits to these categories, but just in case
+    # exclude them anyway
+    filter(!map_cat_dr %in% c('REVSPORT', 'PAYPAL')) %>% 
+    # Rename to a generic reporting date
+    rename(rpt_date = tran_date
+           , id = tran_id) %>% 
+    left_join(cat.ref %>% 
+                rename(map_cat_cr = map_cat
+                       , fs_cr = fs_x) %>% 
+                select(map_cat_cr, fs_cr)
+              , by = c("map_cat_cr")) %>% 
+    left_join(cat.ref %>% 
+                rename(map_cat_dr = map_cat
+                       , fs_dr = fs_x) %>% 
+                select(map_cat_dr, fs_dr)
+              , by = c("map_cat_dr"))
+  
+  tran.pl_cr <- tran.tran %>% 
+    filter(fs_cr == 'PL') %>%
+    # Use the DR amount for PL PL transactions
+    mutate(cr = coalesce(cr, dr)) %>% 
+    select(id, rpt_date, descr, cr, map_cat_cr, rpt_perd) %>% 
+    rename(amt = cr
+           , map_cat = map_cat_cr) 
+  
+  tran.pl_dr <- tran.tran %>% 
+    filter(fs_dr == 'PL') %>%
+    # Use the CR amount for PL PL transactions
+    mutate(dr = coalesce(dr, cr) * -1) %>%
+    select(id, rpt_date, descr, dr, map_cat_dr, rpt_perd) %>% 
+    rename(amt = dr
+           , map_cat = map_cat_dr)
+  
+  tran.consol_pl <- tran.pl_cr %>% 
+    bind_rows(tran.pl_dr) %>% 
+    mutate(src_c = 'TRAN'
+           , fs_x = 'PL')
+  
+  # Repeat the sequence for the Balance sheet  
+  tran.bs_cr <- tran.tran %>% 
+    filter(fs_cr == 'BS') %>%
+    # Record CRs to the BS as negative amounts of the statement DR
+    mutate(cr = coalesce(dr, cr) * -1) %>% 
+    select(id, rpt_date, descr, cr, map_cat_cr, rpt_perd) %>% 
+    rename(amt = cr
+           , map_cat = map_cat_cr)
+  
+  tran.bs_dr <- tran.tran %>% 
+    filter(fs_dr == 'BS') %>%
+    mutate(dr = coalesce(cr, dr)) %>% 
+    select(id, rpt_date, descr, dr, map_cat_dr, rpt_perd) %>% 
+    rename(amt = dr
+           , map_cat = map_cat_dr)
+  
+  tran.consol_bs <- tran.bs_cr %>% 
+    bind_rows(tran.bs_dr) %>% 
+    mutate(src_c = 'TRAN'
+           , fs_x = 'BS')
+  
+  # Append the records from the Financial Statements together
+  tran.consol_fs <- tran.consol_bs %>% 
+    bind_rows(tran.consol_pl)
+  
+  rtn.list <- list(fs = tran.consol_fs, raw = bank.tran)
+  
+  return(rtn.list)
+  
+}
+
+# Produce current year transactions
+tran.rtn <- func_prepBankTran(start_d = rpt.open
+                              , end_d = rpt.curr)
+
+tran.consol_fs <- tran.rtn$fs
+tran.raw_tran <- tran.rtn$raw
+
+```
+
+```{r bankSave, echo=FALSE, message=FALSE, warning=FALSE}
+
+func_prepBankSave <- function(start_d, end_d) {
+
+  ### Repeat the same for savings
+  bank.save <- func_getTibble(paste0("
+    select save_date
+    , descr
+    , dr
+    , cr
+    , bal
+    , save_id
+    , map_cat_cr
+    , map_cat_dr
+    , rpt_perd
+    from bank.save
+    where save_date >= '", start_d, "'
+    and save_date <= '", end_d, "'"))
+  
+  # Exclude manually adjusted transactions
+  save.tran <- bank.save %>% 
+    rename(rpt_date = save_date
+           , id = save_id) %>% 
+    left_join(cat.ref %>% 
+                rename(map_cat_cr = map_cat
+                       , fs_cr = fs_x) %>% 
+                select(map_cat_cr, fs_cr)
+              , by = c("map_cat_cr")) %>% 
+    left_join(cat.ref %>% 
+                rename(map_cat_dr = map_cat
+                       , fs_dr = fs_x) %>% 
+                select(map_cat_dr, fs_dr)
+              , by = c("map_cat_dr"))
+  
+  save.pl_cr <- save.tran %>% 
+    filter(fs_cr == 'PL') %>%
+    mutate(cr = coalesce(cr, dr)) %>% 
+    select(id, rpt_date, descr, cr, map_cat_cr, rpt_perd) %>% 
+    rename(amt = cr
+           , map_cat = map_cat_cr) 
+  
+  save.pl_dr <- save.tran %>% 
+    filter(fs_dr == 'PL') %>%
+    # Record DRs to the PL as negative amounts
+    mutate(dr = coalesce(dr, cr) * -1) %>% 
+    select(id, rpt_date, descr, dr, map_cat_dr, rpt_perd) %>% 
+    rename(amt = dr
+           , map_cat = map_cat_dr) 
+  
+  save.consol_pl <- save.pl_cr %>% 
+    bind_rows(save.pl_dr) %>% 
+    mutate(src_c = 'SAVE'
+           , fs_x = 'PL')
+  
+  # Repeat the sequence for the Balance sheet  
+  save.bs_cr <- save.tran %>% 
+    filter(fs_cr == 'BS') %>%
+    # Record CRs to the BS as negative amounts of the statement DR
+    mutate(cr = coalesce(dr * -1, cr)) %>% 
+    select(id, rpt_date, descr, cr, map_cat_cr, rpt_perd) %>% 
+    rename(amt = cr
+           , map_cat = map_cat_cr)
+  
+  save.bs_dr <- save.tran %>% 
+    filter(fs_dr == 'BS') %>%
+    mutate(dr = coalesce(cr, dr)) %>% 
+    select(id, rpt_date, descr, dr, map_cat_dr, rpt_perd) %>% 
+    rename(amt = dr
+           , map_cat = map_cat_dr)
+  
+  save.consol_bs <- save.bs_cr %>% 
+    bind_rows(save.bs_dr) %>% 
+    mutate(src_c = 'SAVE'
+           , fs_x = 'BS')  
+  
+  save.consol_fs <- save.consol_bs %>% 
+    bind_rows(save.consol_pl)
+  
+  return(save.consol_fs)
+
+}
+
+save.consol_fs <- func_prepBankSave(start_d = rpt.open
+                                    , end_d = rpt.curr)
+
+```
+
+```{r paypalTransactions, message=FALSE, warning=FALSE, echo=FALSE}
+
+func_prepPaypal <- function(inputBankTran) {
+
+  # Create a table of paypal transactions from the bank statement
+  bank.paypal <- inputBankTran %>% 
+    filter(map_cat_cr == "PAYPAL") %>% 
+    mutate(bank_ref_id = toupper(str_trim(str_replace_all(descr, grepl.paypal, "")))) 
+  
+  if (nrow(bank.paypal) > 0) {
+    
+    # Get a list of paypal reference IDs
+    bank.paypal.ref_id <- paste(bank.paypal$bank_ref_id, collapse = "', '")
+    
+    # Extract the corresponding detail from the paypal transaction listing
+    paypal.tran <- func_getTibble(paste0("
+      select pp_id 
+      , bank_ref_id
+      , pp_ts
+      , name
+      , gross
+      , net
+      , map_cat
+      , rpt_perd
+      from paypal.tran
+      where bank_ref_id in ('", bank.paypal.ref_id, "');")) %>% 
+      mutate(fee = gross - net)
+    
+    bank.paypal.tran <- bank.paypal %>%
+      rename(rpt_date = tran_date
+             , amt = cr) %>% 
+      select(rpt_date, bank_ref_id, amt) %>% 
+      left_join(paypal.tran %>% 
+                  select(pp_id, pp_ts, gross, net, fee, map_cat, bank_ref_id, rpt_perd)
+                , by = c("bank_ref_id")) %>% 
+      filter(map_cat != 'PAYPAL')
+    
+    # Perform a check on the join
+    bank.paypal.rec <- bank.paypal.tran %>% 
+      group_by(rpt_date, bank_ref_id) %>% 
+      summarise(gross = sum(gross)
+                , net = sum(net)
+                , fee = sum(fee)) %>% 
+      ungroup() %>% 
+      left_join(bank.paypal %>% 
+                  select(bank_ref_id, cr), by = c("bank_ref_id")) %>% 
+      mutate(checkCR = round(net - cr, 4))
+    
+    out.paypal <- bank.paypal.tran %>% 
+      select(rpt_date, pp_id, bank_ref_id, gross, fee, map_cat, rpt_perd) %>% 
+      gather("amt_type", "amt", -pp_id, -map_cat, -rpt_date, -bank_ref_id, -rpt_perd) %>% 
+      mutate(map_cat = if_else(amt_type == 'fee', 'TRAN_FEE', map_cat)
+             , amt = if_else(amt_type == 'fee', -amt, amt)) %>% 
+      rename(type = amt_type
+             , descr = bank_ref_id
+             , id = pp_id) %>% 
+      mutate(src_c = 'PAYPAL')
+    
+    pl.paypal <- out.paypal %>% 
+      mutate(fs_x = 'PL') %>% 
+      select(id, rpt_date, descr, amt, map_cat, rpt_perd, src_c, fs_x)
+    
+    bs.paypal <- out.paypal %>% 
+      mutate(fs_x = 'BS') %>% 
+      mutate(map_cat = 'CASH_AT_BANK') %>% 
+      select(id, rpt_date, descr, amt, map_cat, rpt_perd, src_c, fs_x)
+    
+    paypal.consol_fs <- pl.paypal %>% 
+      bind_rows(bs.paypal)
+    
+    rtn.list <- list(output = paypal.consol_fs
+                     , rec = bank.paypal.rec)
+    
+  } else {
+    
+    out.paypal <- tibble(id = as.double()
+                         , rpt_date = as.Date(NA)
+                         , descr = as.character()
+                         , amt = as.double()
+                         , map_cat = as.character()
+                         , rpt_perd = as.character()
+                         , src_c = as.character()
+                         , fs_x = as.character())
+    
+    bank.paypal.rec <- tibble(tran_date = as.Date(NA)
+                              , bank_ref_id = as.character()
+                              , gross = as.double()
+                              , net = as.double()
+                              , fee = as.double()
+                              , cr = as.double()
+                              , checkCR = as.double())
+    
+    rtn.list <- list(output = out.paypal
+                     , rec = bank.paypal.rec)
+    
+  }
+
+  return(rtn.list)
+  
+}
+
+rpt.paypal.rtn <- func_prepPaypal(inputBankTran = tran.raw_tran)
+
+paypal.consol_fs <- rpt.paypal.rtn$output
+bank.paypal.rec <- rpt.paypal.rtn$rec
+
+```
+
+```{r revSport, echo=FALSE, message=FALSE, warning=FALSE}
+
+func_prepRevSport <- function(start_d, end_d) {
+
+  # Extract data from the bank account  
+  tran.revsport <- func_getTibble(paste0("
+      select 
+      tran_date
+      , case 
+          when cr is null then -dr 
+          else cr 
+      end as cr
+      from bank.tran 
+      where map_cat_cr = 'REVSPORT'
+      order by tran_date")) %>% 
+    mutate(transfer_id = row_number())
+  
+  # Get a listing from the revsport data
+  revsport.payments <- func_getTibble(paste0("
+      select 
+      transfer_id
+      , transfer_date
+      , amt
+      , rpt_perd
+      from revsport.payments
+      order by transfer_date desc
+  "))
+  
+  revsport.members <- func_getTibble(paste0("
+      select transfer_parent_id
+      , member_name
+      , member_expiry
+      , amt as tran_amt
+      from revsport.members
+      order by transfer_parent_id desc
+  "))
+  
+  revsport.unknown <- func_getTibble(paste0("
+      select transfer_parent_id
+      , CAST(NULL as varchar(1)) as member_name
+      , CAST(NULL as date) as member_expiry
+      , amt as tran_amt
+      from revsport.unknown
+      order by transfer_parent_id desc
+  "))
+  
+  revsport.coaching <- func_getTibble(paste0("
+      select transfer_parent_id
+      , transfer_ref
+      , member_name
+      , info
+      , amt as tran_amt
+      from revsport.coaching
+      order by transfer_parent_id desc
+  "))
+  
+  revsport.juniors <- func_getTibble(paste0("
+      select transfer_parent_id
+      , player_name
+      , info
+      , amt as tran_amt
+      from revsport.juniors
+      order by transfer_parent_id desc
+  "))  
+  
+  revsport.refunds <- func_getTibble(paste0("
+      select transfer_parent_id
+      , transfer_ref
+      , member_name
+      , amt as tran_amt
+      from revsport.refunds
+      order by transfer_parent_id desc
+  "))
+  
+  members.consol <- tran.revsport %>% 
+    left_join(revsport.payments, by = c("transfer_id")) %>% 
+    inner_join(revsport.members, by = c("transfer_id" = "transfer_parent_id")) %>% 
+    select(transfer_id, tran_date, tran_amt, member_name, member_expiry, rpt_perd) %>% 
+    fuzzy_left_join(membership.ref
+                    , by = c("tran_amt" = "gross_fee"
+                             , "tran_date" = "efft_d"
+                             , "tran_date" = "expy_d")
+                    , match_fun = list(`==`, `>=`, `<=`)) %>% 
+    mutate(src_c = 'REV'
+           , map_cat = coalesce(map_cat, "ADLT_RENEW")
+           , descr = paste0(str_replace_all(member_name, " ", "_")
+                            , "_"
+                            , str_replace_all(member_expiry, "-", "_"))) %>% 
+    select(transfer_id, tran_date, tran_amt, map_cat, rpt_perd, descr, src_c) %>% 
+    rename(id = transfer_id
+           , rpt_date = tran_date
+           , amt = tran_amt) %>% 
+    filter(rpt_date >= start_d & rpt_date <= end_d)
+  
+  coaching.consol <- tran.revsport %>% 
+    left_join(revsport.payments, by = c("transfer_id")) %>% 
+    inner_join(revsport.coaching, by = c("transfer_id" = "transfer_parent_id")) %>% 
+    left_join(revsport.refunds %>% 
+                select(transfer_ref) %>% 
+                mutate(refund_flag = TRUE), by = c("transfer_ref")) %>% 
+    mutate(map_cat = case_when(grepl("^(Challenger|Premier|Future|Squad Term)", info)  ~ 'SQUAD_COACH_FEE'
+                               , is.na(info) & refund_flag ~ 'EXCLUDE'
+                               , is.na(info) ~ 'REFUND_PENDING'
+                               , TRUE ~ 'ADLT_COACH_FEE')) %>% 
+    mutate(src_c = 'REV'
+           , descr = if_else(is.na(info), transfer_ref, info)) %>% 
+    select(transfer_id, transfer_ref, tran_date, tran_amt, map_cat, rpt_perd, descr, src_c) %>% 
+    rename(id = transfer_id
+           , rpt_date = tran_date
+           , amt = tran_amt) %>% 
+    filter(rpt_date >= start_d & rpt_date <= end_d)
+  
+  juniors.consol <- tran.revsport %>% 
+    left_join(revsport.payments, by = c("transfer_id")) %>% 
+    inner_join(revsport.juniors, by = c("transfer_id" = "transfer_parent_id")) %>% 
+    mutate(map_cat = 'JNR_PROGRAM_FEE'
+           , src_c = 'REV'
+           , descr = info) %>% 
+    select(transfer_id, tran_date, tran_amt, map_cat, rpt_perd, descr, src_c) %>% 
+    rename(id = transfer_id
+           , rpt_date = tran_date
+           , amt = tran_amt) %>% 
+    filter(rpt_date >= start_d & rpt_date <= end_d)
+  
+  unknown.consol <- tran.revsport %>% 
+    left_join(revsport.payments, by = c("transfer_id")) %>% 
+    inner_join(revsport.unknown, by = c("transfer_id" = "transfer_parent_id")) %>% 
+    mutate(map_cat = 'REVSPORT_UNKN'
+           , src_c = 'REV'
+           , descr = "Unknown") %>% 
+    select(transfer_id, tran_date, tran_amt, map_cat, rpt_perd, descr, src_c) %>% 
+    rename(id = transfer_id
+           , rpt_date = tran_date
+           , amt = tran_amt) %>% 
+    filter(rpt_date >= start_d & rpt_date <= end_d)
+  
+  refunds.consol <- tran.revsport %>% 
+    left_join(revsport.payments, by = c("transfer_id")) %>% 
+    inner_join(revsport.refunds, by = c("transfer_id" = "transfer_parent_id")) %>% 
+    left_join(coaching.consol %>% 
+                select(transfer_ref, map_cat) %>% 
+                rename(map_cat_coaching = map_cat)
+              , by = c("transfer_ref" = "transfer_ref")) %>% 
+    mutate(map_cat = case_when(grepl("^M(U|R)", transfer_ref) ~ 'ADLT_REFUND'
+                               , grepl("^MC", transfer_ref) ~ map_cat_coaching)
+           , src_c = 'REV'
+           , descr = paste0(transfer_ref, "_", member_name)) %>% 
+    select(transfer_id, tran_date, tran_amt, map_cat, rpt_perd, descr, src_c) %>% 
+    rename(id = transfer_id
+           , rpt_date = tran_date
+           , amt = tran_amt) %>% 
+    filter(rpt_date >= start_d & rpt_date <= end_d)
+  
+  revsport.tran <- bind_rows(members.consol
+            , coaching.consol %>% 
+              select(-transfer_ref)
+            , juniors.consol
+            , refunds.consol
+            , unknown.consol) %>% 
+    rename(map_cat_cr = map_cat) %>% 
+    mutate(fs_cr = 'PL'
+           # All of these corresponding transactions have 
+           # landed in the bank account
+           , map_cat_dr = 'CASH_AT_BANK'
+           , fs_dr = 'BS') %>% 
+    select(id, rpt_date, descr, amt, map_cat_dr, map_cat_cr, rpt_perd, src_c, fs_dr, fs_cr)
+  
+  # Now process the Revsport data into PL and BS tables
+  revsport.pl_cr <- revsport.tran %>% 
+    filter(fs_cr == 'PL') %>%
+    select(id, rpt_date, descr, amt, map_cat_cr, rpt_perd, src_c, fs_cr) %>% 
+    rename(map_cat = map_cat_cr
+           , fs_x = fs_cr)
+  
+  # Repeat the sequence for the Balance sheet  
+  revsport.bs_dr <- revsport.tran %>% 
+    filter(fs_dr == 'BS') %>%
+    select(id, rpt_date, descr, amt, map_cat_dr, rpt_perd, src_c, fs_dr) %>% 
+    rename(map_cat = map_cat_dr
+           , fs_x = fs_dr)
+  
+  revsport.consol_fs <- revsport.pl_cr %>% 
+    bind_rows(revsport.bs_dr)
+  
+  return(revsport.consol_fs)
+  
+}
+
+revsport.consol_fs <- func_prepRevSport(start_d = rpt.open
+                                        , end_d = rpt.curr)
+
+```
+
+```{r manualJournals, echo=FALSE, message=FALSE, warning=FALSE}
+
+# Add in manual journals for the period
+manual.proc <- manual.journals %>% 
+  left_join(cat.ref %>% 
+              select(map_cat, fs_x) %>% 
+              rename(map_cat_dr = map_cat
+                     , fs_dr = fs_x)
+            , by = c("map_cat_dr")) %>% 
+  left_join(cat.ref %>% 
+              select(map_cat, fs_x) %>% 
+              rename(map_cat_cr = map_cat
+                     , fs_cr = fs_x)
+            , by = c("map_cat_cr")) %>% 
+  rename(id = man_id
+         , descr = note)
+
+manual.pl_cr <- manual.proc %>% 
+  filter(fs_cr == 'PL') %>% 
+  select(id, rpt_date, descr, map_cat_cr, amt, src_c, rpt_perd) %>% 
+  rename(map_cat = map_cat_cr) %>% 
+  mutate(fs_x = 'PL')
+
+manual.pl_dr <- manual.proc %>% 
+  filter(fs_dr == 'PL') %>% 
+  select(id, rpt_date, descr, map_cat_dr, amt, src_c, rpt_perd) %>% 
+  rename(map_cat = map_cat_dr) %>% 
+  mutate(amt = amt * -1
+         , fs_x = 'PL')
+
+manual.bs_cr <- manual.proc %>% 
+  filter(fs_cr == 'BS') %>% 
+  select(id, rpt_date, descr, map_cat_cr, amt, src_c, rpt_perd) %>% 
+  rename(map_cat = map_cat_cr) %>% 
+  # Record credits as negative amounts to the BS
+  mutate(amt = amt * -1
+         , fs_x = 'BS')
+
+manual.bs_dr <- manual.proc %>% 
+  filter(fs_dr == 'BS') %>% 
+  select(id, rpt_date, descr, map_cat_dr, amt, src_c, rpt_perd) %>% 
+  rename(map_cat = map_cat_dr) %>% 
+  mutate(fs_x = 'BS')
+
+manual.consol_fs <- manual.pl_cr %>% 
+  bind_rows(manual.pl_dr) %>% 
+  bind_rows(manual.bs_cr) %>% 
+  bind_rows(manual.bs_dr) %>% 
+  filter(rpt_date >= rpt.open & rpt_date <= rpt.close)
+
+```
+
+```{r consolTransactions, echo=FALSE, message=FALSE, warning=FALSE}
+
+# Consolidate all sources
+# Begin with the cash transactions
+consol_fs <- tran.consol_fs %>% 
+  bind_rows(save.consol_fs) %>% 
+  bind_rows(revsport.consol_fs) %>% 
+  bind_rows(paypal.consol_fs) %>% 
+  # Non-cash transactions
+  bind_rows(manual.consol_fs)
+
+```
+
+```{r generateProfitLoss, echo=FALSE, message=FALSE, warning=FALSE}
+
+# Generate the profit and loss
+# For the full year to date
+pl.data <- consol_fs %>% 
+  filter(fs_x == 'PL') %>% 
+  left_join(cat.ref, by = c("map_cat", "fs_x"))
+
+# Save the PL like previous years
+write_csv(pl.data, "FY22/PROC/rpt_consol.csv", append = F, col_names = T)
+
+# Create a journal to transfer the PL result to the balance sheet
+pl.bs_transfer <- pl.data %>% 
+  mutate(rpt_date = ceiling_date(rpt_date, unit = "month") - 1) %>% 
+  group_by(rpt_date) %>% 
+  # The amount will be multiplied by -1 to transfer it across the FS
+  summarise(amt = sum(amt) * -1) %>%
+  ungroup() %>% 
+  mutate(map_cat = 'RETAINED_EQUITY')
+
+```
+
+```{r generateBalanceSheet, echo=FALSE, message=FALSE, warning=FALSE}
+
+# Generate the balance sheet
+
+# Get the balances at the start of the year
+bal.ob <- func_getTibble(paste0("
+    select rpt_date
+    , map_cat
+    , amt
+    from bal.map_cat
+    where rpt_date = '", rpt.open - 1, "';"))
+
+# Include the changes to the BS accounts
+bs.data <- consol_fs %>% 
+  filter(fs_x == 'BS') %>%
+  mutate(rpt_date = ceiling_date(rpt_date, unit = "month") - 1) %>% 
+  group_by(rpt_date, map_cat) %>% 
+  summarise(amt = sum(amt)) %>% 
+  ungroup()
+
+# Calculate the new closing balances for the period
+bal.cb <- bal.ob %>% 
+  select(rpt_date, map_cat, amt) %>% 
+  # Append the changes
+  bind_rows(bs.data) %>% 
+  # Append the transfer from PL
+  bind_rows(pl.bs_transfer)
+
+bal.cb_dates <- bal.cb %>% 
+  distinct(rpt_date)
+
+bal.cb_accts <- bal.cb %>% 
+  distinct(map_cat) %>% 
+  crossing(bal.cb_dates) %>% 
+  arrange(map_cat, rpt_date) %>% 
+  left_join(bal.cb, by = c("rpt_date", "map_cat")) %>% 
+  mutate(amt = coalesce(amt, 0)) %>% 
+  group_by(map_cat) %>% 
+  mutate(cum_amt = cumsum(amt)) %>% 
+  ungroup() %>% 
+  arrange(rpt_date, map_cat) %>% 
+  left_join(cat.ref %>% select(map_cat, cat_lbl, fs_cat, sort_order), by = c("map_cat"))
+
+# Check the Balance sheet balances
+bs.assets <- bal.cb_accts %>% 
+  filter(fs_cat == "Assets") %>% 
+  summarise(a = sum(amt))
+
+bs.not_assets <- bal.cb_accts %>% 
+  filter(fs_cat %in% c("Liabilities & Equity")) %>% 
+  summarise(le = sum(amt))
+
+# Must be zero
+bs.balance_check <- round(bs.assets$a + bs.not_assets$le, 0)
+
+# Return the table of account balances to the database
+if (bs.balance_check == 0) {
+  
+  # Flush the table of records
+  dbSendQuery(conn, paste0("
+    DELETE FROM bal.map_cat 
+    WHERE rpt_date > '", rpt.open, "' 
+    AND rpt_date <= '", rpt.close, "'"))
+  
+  # Write the accounts back to the database
+  dbx <- dbWriteTable(conn = conn
+                      , name = c("bal", "map_cat")
+                      , value = bal.cb_accts %>% 
+                        # Exclude the opening balance accounts
+                        filter(rpt_date > rpt.open) %>% 
+                        # Exclude zero balance records
+                        filter(amt != 0 & cum_amt != 0) %>% 
+                        select(rpt_date, map_cat, amt, cum_amt)
+                      , append = T
+                      , row.names = F)
+  
+} else {
+  
+  print("Balance Sheet does not balance. Check")
+  
+}
+
+```
+
+```{r bankReconciliation, echo=FALSE, warning=FALSE, message=FALSE}
+
+# Aggregate all the transactions to the Cash At Bank (CAB) account
+bs.cab_change <- consol_fs %>% 
+  filter(fs_x == 'BS') %>% 
+  filter(map_cat == 'CASH_AT_BANK') %>% 
+  mutate(lbl = 'Change in transactions') %>% 
+  group_by(lbl) %>% 
+  summarise(amt = sum(amt)) %>% 
+  ungroup()
+
+bs.cab_calc_cb <- bal.ob %>% 
+  filter(map_cat == 'CASH_AT_BANK') %>% 
+  select(amt) %>% 
+  bind_rows(bs.cab_change) %>% 
+  summarise(amt = sum(amt)) %>% 
+  mutate(lbl = 'Calculated closing balance')
+
+# Perform a bank reconciliation by comparing it
+# to the manually input amounts
+bs.rec <- bs.check %>% 
+  filter(!is.na(bank_tran)) %>% 
+  tail(1) %>% 
+  mutate(amt = bank_tran + bank_save
+         , lbl = 'Balance from bank statement') %>% 
+  select(lbl, amt)
+
+bs.cab_summary <- bal.ob %>% 
+  filter(map_cat == 'CASH_AT_BANK') %>% 
+  mutate(lbl = 'Opening balance') %>% 
+  select(lbl, amt) %>% 
+  bind_rows(bs.cab_change) %>% 
+  bind_rows(bs.cab_calc_cb) %>% 
+  bind_rows(bs.rec)
+
+# Check the difference between the calculated closing balance
+# and closing balance from the bank statement
+bs.rec_check <- round(bs.cab_summary$amt[3] - bs.cab_summary$amt[4], 2)
+
+```
+
+### Financial Statements {.tabset .tabset-fade .tabset-pills}
+#### Financial Performance
+```{r echo=FALSE, warning=FALSE, message=FALSE, fig.align="left"}
+
+tbl_pl <- pl.data %>% 
+  filter(map_cat != 'TRANSFER') %>% 
+  # Summarise for the PL
+  mutate(cat_lbl = case_when(str_sub(map_cat, 1, 3) == "JNR" & fs_cat == "Income" ~ "Junior program income"
+                             , str_sub(map_cat, 1, 3) == "JNR" & fs_cat == "Expenses" ~ "Junior program expenses"
+                             , str_sub(map_cat, 1, 5) == "SQUAD" & fs_cat == "Income" ~ "Squad program expenses"
+                             , str_sub(map_cat, 1, 5) == "SQUAD" & fs_cat == "Expenses" ~ "Squad program expenses"
+                             , fs_cat == 'Exclude' ~ 'Other inc/exp'
+                             , TRUE ~ cat_lbl)) %>% 
+  group_by(fs_cat, cat_lbl) %>% 
+  summarise(amt = sum(amt)) %>% 
+  ungroup() %>%
+  # Re-map the exclusion to either income or expenses
+  mutate(fs_cat = case_when(fs_cat == 'Exclude' & amt > 0 ~ 'Income'
+                            , fs_cat == 'Exclude' & amt < 0 ~ 'Expenses'
+                            , TRUE ~ fs_cat)) %>% 
+  # Exclude any zero amount items
+  filter(amt != 0) %>% 
+  arrange(desc(fs_cat), desc(abs(amt))) %>% 
+  select(fs_cat, cat_lbl, amt)
+
+gt(data = tbl_pl
+   , rowname_col = "cat_lbl"
+   , groupname_col = "fs_cat") %>% 
+  tab_style(
+    style = list(
+      cell_text(align = "left", color = "white")
+      , cell_borders(color = "#002A52"))
+    , locations = cells_stub(rows = TRUE)
+  ) %>%  
+  tab_style(
+    style = list(
+      cell_borders(color = "#002A52")
+    )
+    , locations = cells_body()
+  ) %>% 
+  fmt_currency(
+    columns = amt
+    , currency = "dollar"
+    , decimals = 0) %>%
+  tab_options(
+    table.font.names = c("Proxima Nova", "Arial")
+    , table.font.size = "100%"
+    , row_group.font.weight = "bold"
+    , table.background.color = "#002A52"
+    , table.border.bottom.color = "#002A52"
+    , table.border.top.color = "#002A52"
+    , table_body.border.bottom.color = "#002A52"
+    , table_body.border.top.color = "#002A52"
+  ) %>% 
+  cols_label(amt = "YTD Amount") %>% 
+  tab_style(style = list(
+    cell_text(
+      weight = "bold")
+    , cell_borders(color = "#002A52")
+    )
+    , locations = cells_column_labels()
+  ) %>% 
+  tab_header(
+    title = md("**CBVA Financial Peformance**")
+    , subtitle = md("*For the period 1 April 2021 to 31 March 2022*")) %>% 
+  
+  summary_rows(
+    groups = "Income"
+    , columns = amt
+    , fns = list("Total Income" = "sum")
+    , formatter = fmt_currency
+    , currency = "dollar"
+    , decimals = 0) %>%
+  summary_rows(
+    groups = "Expenses"
+    , columns = amt
+    , fns = list("Total Expenses" = "sum")
+    , formatter = fmt_currency
+    , currency = "dollar"
+    , decimals = 0) %>% 
+  tab_style(
+    style = list(
+      cell_text(
+        align = "left"
+        , weight = "bold")
+    )
+    , locations = cells_stub_summary()
+  ) %>% 
+  tab_style(
+    style = list(
+      cell_text(weight = "bold")
+    )
+    , locations = cells_summary()
+  ) %>% 
+  
+  grand_summary_rows(
+    columns = amt
+    , fns = list("Net Result" = "sum")
+    , formatter = fmt_currency
+    , currency = "dollar"
+    , decimal = 0) %>% 
+  tab_style(
+    style = list(
+      cell_text(align = "left", weight = "bold")
+    )
+    , locations = cells_stub_grand_summary()
+  ) %>% 
+  tab_style(
+    style = list(
+      cell_text(weight = "bold")
+    )
+    , locations = cells_grand_summary()
+  )
+
+```
+
+***  
+
+#### Financial Position
+```{r rptBalanceSheet, echo=FALSE, eval=TRUE, warning=FALSE, message=FALSE}
+
+tbl_bs.ob <- bal.cb_accts %>% 
+  filter(cum_amt != 0) %>% 
+  filter(rpt_date == rpt.open - 1) %>% 
+  select(fs_cat, cat_lbl, cum_amt) %>% 
+  rename(Opening_Balance = cum_amt
+         , fs_cat_ob = fs_cat)
+
+tbl_bs.cb <- bal.cb_accts %>% 
+  filter(cum_amt != 0) %>% 
+  filter(rpt_date == rpt.close) %>% 
+  select(fs_cat, cat_lbl, cum_amt, sort_order) %>% 
+  rename(Closing_Balance = cum_amt
+         , fs_cat_cb = fs_cat)
+
+tbl_bs <- tbl_bs.cb %>% 
+  arrange(sort_order) %>% 
+  full_join(tbl_bs.ob, by = c("cat_lbl")) %>% 
+  mutate(fs_cat_cb = coalesce(fs_cat_cb, fs_cat_ob)
+         , Opening_Balance = coalesce(Opening_Balance, 0)
+         , Change = Closing_Balance - Opening_Balance) %>% 
+  select(fs_cat_cb, cat_lbl, Opening_Balance, Closing_Balance, Change)
+
+gt(data = tbl_bs
+   , rowname_col = "cat_lbl"
+   , groupname_col = "fs_cat_cb") %>% 
+  tab_header(title = md("**CBVA Financial Position**")) %>% 
+  tab_style(style = list(
+    cell_text(align = "left")
+    )
+    , locations = cells_stub(rows = TRUE)
+  ) %>% 
+  cols_label(Opening_Balance = "31 March 21"
+             , Closing_Balance = "31 March 22") %>% 
+  tab_style(style = list(
+    cell_text(weight = "bold")
+    , cell_borders(color = "#002A52")
+    )
+    , locations = cells_column_labels()) %>% 
+  tab_options(
+    table.font.names = c("Proxima Nova", "Arial")
+    , table.font.size = "100%"
+    , row_group.font.weight = "bold"
+    , table.background.color = "#002A52"
+    , table.border.bottom.color = "#002A52"
+    , table.border.top.color = "#002A52"
+    , table_body.border.bottom.color = "#002A52"
+    , table_body.border.top.color = "#002A52"
+  ) %>% 
+  fmt_currency(
+    columns = c("Opening_Balance", "Closing_Balance", "Change")
+    , currency = "dollar"
+    , decimals = 0
+  ) %>%
+  
+  summary_rows(
+    groups = "Assets"
+    , columns = c("Opening_Balance", "Closing_Balance", "Change")
+    , fns = list("Total Assets" = "sum")
+    , formatter = fmt_currency
+    , currency = "dollar"
+    , decimals = 0
+  ) %>%
+  summary_rows(
+    groups = "Liabilities & Equity"
+    , columns = c("Opening_Balance", "Closing_Balance", "Change")
+    , fns = list("Total Liabilities & Equity" = "sum")
+    , formatter = fmt_currency
+    , currency = "dollar"
+    , decimals = 0
+  ) %>%  
+  tab_style(
+    style = list(
+      cell_text(align = "left", weight = "bold")
+    )
+    , locations = cells_stub_summary()
+  ) %>% 
+  tab_style(
+    style = list(
+      cell_text(weight = "bold")
+    )
+    , locations = cells_summary()
+  )  
+
+```
+
+<br>
+<span style="color:white">**Additional Notes:**</span>
+<br>
+<span style="color:white">1. The Junior Support Fund was contributed to by Jesse van de Sande (Equipment Sub-committee), who generously donated the remainder of his honorarium after membership fee reimbursement. This was expensed before at year end supporting 4 participants in the Junior Program.</span>
+<br>
+<span style="color:white">2. Brand assets refer to CBVA undertaking a re-branding with the assistance of HutchTouch. These are historical costs paid for the re-branding, and not any valuation of our brand.</span>
+<br>
+<span style="color:white">3. The cost of the new trailer has been capitalised as an asset on Balance Sheet. It will be depreciated evenly over a 3 year life.</span>
+<br>
+<span style="color:white">4. Unearned fees refer to FY23 membership fees received prior to the new financial year.</span>
+<br>
+<span style="color:white">5. Accrued expenses refer to estimates of known costs, yet to be invoiced. The amount here refers to the amount outstanding to HutchTouch.</span>
+
+***
+
+### Additional Analysis {.tabset .tabset-fade .tabset-pills}
+```{r funcTornado, echo=FALSE, warning=FALSE, message=FALSE}
+
+func_prepTornado <- function(inputData) {
+  
+  x <- inputData %>% 
+    # Re-map exclusions to an other income / expense category
+    mutate(cat_lbl = if_else(fs_cat == 'Exclude', 'Other inc/exp', cat_lbl)) %>% 
+    group_by(fs_cat, map_cat, cat_lbl) %>% 
+    summarise(amt = sum(amt)) %>% 
+    ungroup() %>% 
+    mutate(fs_cat = case_when(fs_cat == 'Exclude' & amt >= 0 ~ 'Income'
+                            , fs_cat == 'Exclude' & amt < 0 ~ 'Expenses'
+                            , TRUE ~ fs_cat)) %>% 
+    arrange(desc(fs_cat), desc(abs(amt))) %>% 
+    mutate(rnk = factor(row_number())) %>% 
+    mutate(cat_lbl_f = factor(cat_lbl, levels = unique(cat_lbl[order(rnk, decreasing = T)]), ordered = T)) %>% 
+    mutate(inc_lbl = if_else(fs_cat == 'Income'
+                             , paste0(cat_lbl, " "
+                                      , scales::dollar(amt, accuracy = 1))
+                             , "")
+           , exp_lbl = if_else(fs_cat == 'Expenses'
+                               , paste0(cat_lbl, " "
+                                        , scales::dollar(amt, accuracy = 1))
+                               , "")) %>% 
+    # Exclude any zero balance items
+    filter(amt != 0)
+  
+  return(x)
+  
+}
+
+func_plotTornado <- function(inputData
+                             , inputTitle
+                             , inputSubtitle
+                             , inputLimits) {
+  
+  g <- ggplot(inputData, aes(x = cat_lbl_f, y = amt, fill = fs_cat)) + 
+    geom_bar(stat = "identity", show.legend = F) + 
+    geom_text(aes(x = cat_lbl_f, y = -250, label = inc_lbl), hjust = 1, size = 3, colour = "#CDB98F") +
+    geom_text(aes(x = cat_lbl_f, y = 250, label = exp_lbl), hjust = 0, size = 3, colour = "#A3DCE4") +
+    coord_flip() +
+    scale_fill_manual(values = c("Income" = "#CDB98F", "Expenses" = "#A3DCE4")) +
+    scale_y_continuous(labels = scales::comma, limits = inputLimits) +
+    func_ggtheme(showAxisX = FALSE) +
+    xlab("") +
+    ylab("") +
+    ggtitle(label = inputTitle
+            , subtitle = inputSubtitle)
+
+  return(g)
+  
+}
+
+```
+
+#### Current month performance
+```{r mnthPL, fig.width=9, fig.height=5, echo=FALSE, warning=FALSE, message=FALSE}
+
+rpt.monthly.data <- pl.data %>% 
+  filter(rpt_date > rpt.prev & rpt_date <= rpt.curr) %>% 
+  func_prepTornado()
+
+rpt.monthly.result <- rpt.monthly.data %>% 
+  summarise(amt = sum(amt)) %>% 
+  unlist()
+
+# Produce a string of the result
+if (rpt.monthly.result < 0) {
+  rpt.monthly.result <- paste0("-$", scales::comma(abs(rpt.monthly.result)))
+} else {
+  rpt.monthly.result <- paste0("$", scales::comma(rpt.monthly.result))
+}
+
+# Plot the tornado
+func_plotTornado(inputData = rpt.monthly.data
+               , inputTitle = paste0("Monthly income and expenses for ", rpt.mnth.full, " ", year(rpt.curr))
+               , inputSubtitle = paste0("Net result: ", rpt.monthly.result)
+               , inputLimits = c(-7500, 7500))
+
+```
+
+#### Year to date performance
+```{r ytdPL, fig.width=9, fig.height=10, echo=FALSE, warning=FALSE, message=FALSE}
+
+rpt.ytd.data <- pl.data %>% 
+  func_prepTornado()
+  
+rpt.ytd.result <- rpt.ytd.data %>% 
+  summarise(amt = sum(amt)) %>% 
+  unlist()
+
+if (rpt.ytd.result < 0) {
+  rpt.ytd.result <- paste0("-$", scales::comma(abs(rpt.ytd.result)))
+} else {
+  rpt.ytd.result <- paste0("$", scales::comma(rpt.ytd.result))
+}
+
+func_plotTornado(inputData = rpt.ytd.data
+                 , inputTitle = paste0("YTD income and expenses between "
+                                       , "April 1st ", year(rpt.curr)," and the end of "
+                                       , rpt.mnth.full, " ", year(rpt.curr))
+                 , inputSubtitle = paste0("Net result: ", rpt.ytd.result)
+                 , inputLimits = c(NA, NA))
+
+```
+
+***  
+
+#### Monthly performance
+```{r rptMonthByMonth, fig.width=9, fig.height=6, echo=FALSE, eval=TRUE, warning=FALSE, message=FALSE}
+
+rpt.monthly <- pl.data %>% 
+  # Exclude transfers and assign other exclusions as either income or expenses
+  filter(map_cat != 'TRANSFER') %>%
+  mutate(fs_cat = case_when(fs_cat == 'Exclude' & amt >= 0 ~ 'Income'
+                            , fs_cat == 'Exclude' & amt < 0 ~ 'Expenses'
+                            , TRUE ~ fs_cat)) %>% 
+  mutate(mnth_end = ceiling_date(rpt_date, unit = "month") - 1) %>% 
+  group_by(mnth_end, fs_cat) %>% 
+  summarise(amt = sum(amt)) %>% 
+  ungroup() %>% 
+  mutate(fs_cat = factor(fs_cat
+                         , levels = c("Income", "Expenses")
+                         , labels = c("Income", "Expenses")
+                         , ordered = T))
+
+rpt.monthly.net <- rpt.monthly %>% 
+  group_by(mnth_end) %>% 
+  summarise(net = sum(amt)) %>% 
+  ungroup() %>% 
+  mutate(flagFill = factor(if_else(net < 0, "Neg", "Pos")
+                           , levels = c("Pos", "Neg")
+                           , labels = c("Surplus", "Deficit")
+                           , ordered = T)) %>% 
+  mutate(lbl = scales::comma(round(net, 0))
+         , lbl.y = if_else(net <0, net - 750, net + 750))
+
+rpt.monthly.cum <- rpt.monthly.net %>% 
+  mutate(cum = cumsum(net))
+
+ggplot() + 
+  geom_bar(data = rpt.monthly
+           , aes(x = mnth_end, y = amt, group = fs_cat, fill = fs_cat)
+           , stat = "identity", colour = "#002A52", alpha = 0.75, width = 28) + 
+  geom_bar(data = rpt.monthly.net
+           , aes(x = mnth_end, y = net, fill = flagFill, colour = flagFill)
+           , stat = "identity", show.legend = F, width = 18) +
+  geom_text(data = rpt.monthly.net
+           , aes(x = mnth_end, y = lbl.y, label = lbl, colour = flagFill)
+           , show.legend = F, size = 2.75) +
+  func_ggtheme() + 
+  scale_y_continuous(labels = scales::comma) +
+  scale_x_date(breaks = as.Date(rpt.dates$curr)
+               #, limits = c(rpt.open, rpt.close)
+               , labels = paste0(as.character(month(ymd(010101) + months(month(rpt.dates$curr)-1)
+                                                    ,label = TRUE, abbr = TRUE))
+                                 , "\n"
+                                 , year(rpt.dates$curr))
+               ) + 
+  scale_fill_manual(values = c("Income" = "grey50", "Expenses" = "grey30"
+                               , "Deficit" = "#A3DCE4", "Surplus" = "#CDB98F")) +
+  scale_colour_manual(values = c("Deficit" = "#A3DCE4", "Surplus" = "#CDB98F")) +
+  ylab("") + 
+  xlab("") + 
+  guides(fill = guide_legend(title = "", reverse = T)) +
+  ggtitle("Month by month summary of income, expenses and net result")
+
+```
+
+***  
+
+#### Historical performance
+```{r hisPerformance, fig.width=9, fig.height=8, echo=FALSE, warning=FALSE, message=FALSE}
+
+# Load externally saved reports
+py.consol <- read_csv("FY21/PROC/rpt_consol.csv")
+ppy.consol <- read_csv("FY20/PROC/rpt_consol.csv")
+pppy.consol <- read_csv("FY19/PROC/rpt_consol.csv")
+
+cy.consol <- pl.data %>% 
+  select(rpt_perd, map_cat, amt)
+
+sel.cat_lbl <- c('Adult Renewed membership'
+  , 'Adult New membership'
+  , 'Jnr program income'
+  , 'Squad program income'
+  , 'Administration'
+  , 'Equipment expenses'
+  , 'Jnr program expenses'
+  , 'Squad program expenses')
+
+hist.consol <- bind_rows(py.consol
+                         , ppy.consol
+                         , pppy.consol) %>%
+  # Re-map equipment to the new expense label
+  mutate(map_cat = if_else(map_cat == 'EQUIPMENT', 'EQUIPMENT_EXP', map_cat)) %>% 
+  # Append the current year results
+  bind_rows(cy.consol) %>% 
+  select(rpt_perd, map_cat, amt) %>% 
+  left_join(cat.ref %>% select(map_cat, cat_lbl, fs_cat)
+            , by = c("map_cat")) %>% 
+  mutate(filter_flag = case_when(map_cat %in% c('ADMIN'
+                                                , 'ADLT_NEW'
+                                                , 'ADLT_RENEW'
+                                                , 'EQUIPMENT_EXP'
+                                                ) ~ 1
+                                 , str_sub(map_cat, 1, 3) == 'JNR' ~ 1
+                                 , str_sub(map_cat, 1, 5) == 'SQUAD' ~ 1
+                                 , TRUE ~ 0)) %>% 
+  filter(filter_flag == 1) %>% 
+  mutate(cat_lbl = case_when(str_sub(map_cat, 1, 3) == 'JNR' & fs_cat == 'Income' ~ 'Jnr program income'
+                             , str_sub(map_cat, 1, 3) == 'JNR' & fs_cat == 'Expenses' ~ 'Jnr program expenses'
+                             , str_sub(map_cat, 1, 5) == 'SQUAD' & fs_cat == 'Income' ~ 'Squad program income'
+                             , str_sub(map_cat, 1, 5) == 'SQUAD' & fs_cat == 'Expenses' ~ 'Squad program expenses'
+                             , TRUE ~ cat_lbl)) %>% 
+  group_by(rpt_perd, cat_lbl, fs_cat) %>% 
+  summarise(amt = abs(sum(amt))) %>%
+  ungroup() %>% 
+  mutate(lbl = scales::dollar(amt, scale = .001, accuracy = 0.1, suffix = "k")) %>% 
+  mutate(cat_lbl = factor(cat_lbl
+                          , levels = sel.cat_lbl
+                          , labels = sel.cat_lbl
+                          , ordered = TRUE))
+
+ggplot(hist.consol, aes(x = rpt_perd, y = amt, fill = fs_cat)) +
+  geom_bar(stat = "identity", show.legend = F) +
+  geom_text(aes(label = lbl, colour = fs_cat)
+            , nudge_y = 1250
+            , size = 3.25
+            , fontface = "bold"
+            , show.legend = F) +
+  facet_wrap(~cat_lbl, nrow = 2) +
+  func_ggtheme(setHjust = 0) +
+  xlab("Reporting period") +
+  ylab("$ (Dollars)") +
+  scale_y_continuous(limits = c(0, NA), labels = scales::comma) +
+  scale_fill_manual(values = c("Income" = "#CDB98F", "Expenses" = "#A3DCE4")) +
+  scale_colour_manual(values = c("Income" = "#CDB98F", "Expenses" = "#A3DCE4")) +
+  ggtitle("Trends in selected accounts")
+
+```
+
+***  
+
+#### Monthly cash balance
+```{r plotCashBalance, fig.width=9, fig.height=5, echo=FALSE, warning=FALSE, message=FALSE}
+
+cab.py <- func_getTibble(paste0("
+  select rpt_date
+  , amt
+  FROM bal.map_cat
+  WHERE map_cat = 'CASH_AT_BANK'
+")) %>% 
+  filter(rpt_date < rpt.open - 365) %>% 
+  arrange(desc(rpt_date)) %>% 
+  # Just take the last two PYs
+  head(1) %>% 
+  mutate(perd_id = paste0("PERD", row_number())) %>% 
+  mutate(lbl_amt = scales::dollar(amt, scale = .001, accuracy = 0.1, suffix = "k")
+         , lbl_yr = paste0("FY", str_sub(as.character(year(rpt_date)), 3, 4))
+         , lbl = paste0(lbl_yr,"\nCB\n", lbl_amt))
+
+# Plot monthly cash balance
+cab.monthly <- bal.ob %>% 
+  filter(map_cat == 'CASH_AT_BANK') %>% 
+  select(amt) %>% 
+  mutate(rpt_id = 0) %>% 
+  bind_rows(
+    bs.check %>% 
+      mutate(amt = bank_tran + bank_save) %>% 
+      select(rpt_id, amt))
+
+cab.plot_data <- rpt.dates %>% 
+  select(id, curr) %>% 
+  bind_rows(tibble(id = 0, curr = rpt.open)) %>% 
+  arrange(id) %>% 
+  left_join(cab.monthly, by = c("id" = "rpt_id")) %>% 
+  mutate(lbl = scales::dollar(amt, scale = .001, accuracy = 0.1, suffix = "k")
+         , flag_keep_lbl = case_when(amt == max(amt) ~ "\nMAX"
+                                     , amt == min(amt) ~ "\nMIN"
+                                     , id == rpt.id ~ "FY22\nCB"
+                                     , id == 0 ~ "FY21\nCB"
+                                     , TRUE ~ "0")) %>% 
+  mutate(lbl = if_else(flag_keep_lbl == "0", "", paste0(flag_keep_lbl, "\n", lbl)))
+
+ggplot(cab.plot_data, aes(x = curr, y = amt)) +
+  # Lay down the base
+  geom_bar(stat = "identity", fill = "#CDB98F") +
+
+  # Overlay the label for the current months
+  geom_text(aes(label = lbl)
+          , nudge_y = 5500
+          , size = 3.25, colour = "#CDB98F", fontface = "bold") +
+  
+  # Overlay prior year results
+  geom_hline(data = cab.py, aes(yintercept = amt, colour = perd_id)
+             , linetype = "dashed"
+             , show.legend = FALSE) +
+  geom_text(data = cab.py, aes(x = rpt.open - 30, y = amt, label = lbl)
+            , nudge_y = 5500
+            , size = 3.25, colour = "#A3DCE4", fontface = "bold") +
+  scale_colour_manual(values = c("PERD1" = "#A3DCE4")) +
+  
+  func_ggtheme() +
+  scale_y_continuous(labels = scales::comma, limits = c(0, NA)) +
+  ylab("$ (Dollars)") +
+  xlab(NULL) +
+  ggtitle("Monthly cash balance"
+          , subtitle = "CB = 'Closing Balance'")
+
+```
+
+***  
+
+#### Long term cash trend
+```{r plotLTCashBalance, fig.width=9, fig.height=5, echo=FALSE, warning=FALSE, message=FALSE}
+
+cab.lt <- func_getTibble(
+  "
+  SELECT rpt_date
+  , cum_amt as amt 
+  FROM bal.map_cat
+  where map_cat = 'CASH_AT_BANK'
+  ORDER BY rpt_date
+  "
+)
+
+cab.lt_last <- cab.lt %>% 
+  tail(1) %>% 
+  mutate(lbl = scales::dollar(amt, scale = .001, accuracy = 0.1, suffix = "k"))
+
+ggplot(cab.lt, aes(x = rpt_date, y = amt)) +
+  func_ggtheme() +
+  xlab("") +
+  ylab("$ (Dollars)") +
+  geom_step(colour = "#CDB98F", size = 1.0) +
+  geom_point(data = cab.lt_last, aes(x = rpt_date, y = amt)
+             , colour = "#CDB98F"
+             , size = 3.75) +
+  geom_text(data = cab.lt_last, aes(x = rpt_date, y = amt, label = lbl)
+            , nudge_y = 3000
+            , size = 3.25, colour = "#CDB98F", fontface = "bold") +
+  scale_y_continuous(limits = c(0, NA), labels = scales::comma) +
+  ggtitle("Long term monthly cash balance"
+          , subtitle = "Closing balances from April 2018 to Present")
+
+```
+
+***  
+
+### Detailed Breakdowns {.tabset .tabset-fade .tabset-pills}
+#### Junior Program
+```{r junior_detail, echo=FALSE, warning=FALSE, message=FALSE}
+
+jnr.rpt <- pl.data %>% 
+  filter(str_detect(map_cat, "JNR*")) %>% 
+  group_by(fs_cat, cat_lbl) %>% 
+  summarise(amt = sum(amt)) %>% 
+  ungroup() %>% 
+  arrange(desc(fs_cat), desc(abs(amt)))
+
+gt(jnr.rpt
+   , rowname_col = "cat_lbl"
+   , groupname_col = "fs_cat") %>% 
+  tab_options(
+    table.font.names = c("Proxima Nova", "Arial")
+    , table.font.size = "100%"
+    , row_group.font.weight = "bold"
+    , table.background.color = "#002A52"
+    , table.border.bottom.color = "#002A52"
+    , table.border.top.color = "#002A52"
+    , table_body.border.bottom.color = "#002A52"
+    , table_body.border.top.color = "#002A52"
+  ) %>% 
+  tab_header(title = md("**Junior Program Detail**")) %>% 
+  tab_style(
+    style = list(
+      cell_text(align = "left", color = "white")
+      , cell_borders(color = "#002A52"))
+    , locations = cells_stub(rows = TRUE)
+  ) %>% 
+  tab_style(
+    style = list(
+      cell_borders(color = "#002A52")
+    )
+    , locations = cells_body()
+  ) %>%   
+  cols_label(amt = "YTD Amount") %>% 
+  tab_style(style = list(
+    cell_text(weight = "bold")
+    , cell_borders(color = "#002A52")
+    )
+    , locations = cells_column_labels())  %>% 
+  fmt_currency(
+    columns = amt
+    , currency = "dollar"
+    , decimals = 0
+  ) %>%
+  
+  summary_rows(
+    groups = "Income"
+    , columns = amt
+    , fns = list("Total Income" = "sum")
+    , formatter = fmt_currency
+    , currency = "dollar"
+    , decimals = 0
+  ) %>%
+  summary_rows(
+    groups = "Expenses"
+    , columns = amt
+    , fns = list("Total Expenses" = "sum")
+    , formatter = fmt_currency
+    , currency = "dollar"
+    , decimals = 0
+  ) %>%  
+  tab_style(
+    style = list(
+      cell_text(align = "left", weight = "bold")
+    )
+    , locations = cells_stub_summary()
+  ) %>% 
+  tab_style(
+    style = list(
+      cell_text(weight = "bold")
+    )
+    , locations = cells_summary()
+  ) %>% 
+
+  grand_summary_rows(
+    columns = amt
+    , fns = list("Net Result" = "sum")
+    , formatter = fmt_currency
+    , currency = "dollar"
+    , decimal = 0) %>% 
+  tab_style(
+    style = list(
+      cell_text(align = "left", weight = "bold")
+    )
+    , locations = cells_stub_grand_summary()
+  ) %>% 
+  tab_style(
+    style = list(
+      cell_text(weight = "bold")
+    )
+    , locations = cells_grand_summary()
+  )
+
+```
+
+***  
+
+#### Squad Program
+```{r squad_detail, echo=FALSE, warning=FALSE, message=FALSE}
+
+squad.rpt <- pl.data %>% 
+  filter(str_detect(map_cat, "SQUAD_*")) %>% 
+  group_by(fs_cat, cat_lbl) %>% 
+  summarise(amt = sum(amt)) %>% 
+  ungroup() %>% 
+  arrange(desc(fs_cat), desc(abs(amt)))
+
+gt(squad.rpt
+   , rowname_col = "cat_lbl"
+   , groupname_col = "fs_cat") %>% 
+  tab_options(
+    table.font.names = c("Proxima Nova", "Arial")
+    , table.font.size = "100%"
+    , row_group.font.weight = "bold"
+    , table.background.color = "#002A52"
+    , table.border.bottom.color = "#002A52"
+    , table.border.top.color = "#002A52"
+    , table_body.border.bottom.color = "#002A52"
+    , table_body.border.top.color = "#002A52"
+  ) %>% 
+  tab_header(title = md("**Squad Program Detail**")) %>% 
+  tab_style(style = list(
+    cell_text(align = "left")
+    , cell_borders(color = "#002A52")
+    )
+    , locations = cells_stub(rows = TRUE)
+  ) %>% 
+  tab_style(
+    style = list(
+      cell_borders(color = "#002A52")
+    )
+    , locations = cells_body()
+  ) %>%   
+  cols_label(amt = "YTD Amount") %>% 
+  tab_style(style = list(
+    cell_text(weight = "bold")
+    , cell_borders(color = "#002A52")
+    )
+    , locations = cells_column_labels())  %>% 
+  fmt_currency(
+    columns = amt
+    , currency = "dollar"
+    , decimals = 0
+  ) %>%
+  
+  summary_rows(
+    groups = "Income"
+    , columns = amt
+    , fns = list("Total Income" = "sum")
+    , formatter = fmt_currency
+    , currency = "dollar"
+    , decimals = 0
+  ) %>%
+  summary_rows(
+    groups = "Expenses"
+    , columns = amt
+    , fns = list("Total Expenses" = "sum")
+    , formatter = fmt_currency
+    , currency = "dollar"
+    , decimals = 0
+  ) %>%  
+  tab_style(
+    style = list(
+      cell_text(align = "left", weight = "bold")
+    )
+    , locations = cells_stub_summary()
+  ) %>% 
+  tab_style(
+    style = list(
+      cell_text(weight = "bold")
+    )
+    , locations = cells_summary()
+  ) %>% 
+
+  grand_summary_rows(
+    columns = amt
+    , fns = list("Net Result" = "sum")
+    , formatter = fmt_currency
+    , currency = "dollar"
+    , decimal = 0) %>% 
+  tab_style(
+    style = list(
+      cell_text(align = "left", weight = "bold")
+    )
+    , locations = cells_stub_grand_summary()
+  ) %>% 
+  tab_style(
+    style = list(
+      cell_text(weight = "bold")
+    )
+    , locations = cells_grand_summary()
+  )
+
+```
+
+***  
+
+#### Administration costs
+```{r admin_detail, echo=FALSE, warning=FALSE, message=FALSE}
+
+admin.breakdown <- read_csv("FY22/PROC/admin_breakdown.csv")
+
+admin.rpt <- pl.data %>% 
+  filter(map_cat == "ADMIN") %>% 
+  select(id, src_c, amt) %>% 
+  left_join(admin.breakdown, by = c("id", "src_c")) %>% 
+  group_by(lbl) %>% 
+  summarise(amt = sum(amt * -1)) %>% 
+  ungroup() %>% 
+  arrange(desc(abs(amt)))
+
+gt(admin.rpt
+   , rowname_col = "lbl") %>% 
+  tab_options(
+    table.font.names = c("Proxima Nova", "Arial")
+    , table.font.size = "100%"
+    , row_group.font.weight = "bold"
+    , table.background.color = "#002A52"
+    , table.border.bottom.color = "#002A52"
+    , table.border.top.color = "#002A52"
+    , table_body.border.bottom.color = "#002A52"
+    , table_body.border.top.color = "#002A52"
+  ) %>% 
+  tab_header(title = md("**Admininstration Detail**")) %>% 
+  tab_style(style = list(
+    cell_text(align = "left")
+    , cell_borders(color = "#002A52")
+    )
+    , locations = cells_stub(rows = TRUE)
+  ) %>% 
+  tab_style(
+    style = list(
+      cell_borders(color = "#002A52")
+    )
+    , locations = cells_body()
+  ) %>%   
+  cols_label(amt = "YTD Amount") %>% 
+  tab_style(style = list(
+    cell_text(weight = "bold")
+    , cell_borders(color = "#002A52")
+    )
+    , locations = cells_column_labels())  %>% 
+  fmt_currency(
+    columns = amt
+    , currency = "dollar"
+    , decimals = 0
+  ) %>%
+  
+  grand_summary_rows(
+    columns = amt
+    , fns = list("Total Administration expenses" = "sum")
+    , formatter = fmt_currency
+    , currency = "dollar"
+    , decimal = 0) %>% 
+  tab_style(
+    style = list(
+      cell_text(align = "left", weight = "bold")
+    )
+    , locations = cells_stub_grand_summary()
+  ) %>% 
+  tab_style(
+    style = list(
+      cell_text(weight = "bold")
+    )
+    , locations = cells_grand_summary()
+  )
+
+```
+
+***  
+
+### Reconciliations {.tabset .tabset-fade .tabset-pills}
+#### Cash reconciliation
+
+<br>
+<span style="color:white">The table below shows the opening cash balance, the net movement from cash transactions and a calculated closing balance compared to the closing balance from the bank statement.</span>
+<br>
+
+```{r echo=FALSE, warning=FALSE, message=FALSE}
+
+gt(bs.cab_summary
+   , rowname_col = "lbl") %>% 
+  tab_options(
+    table.font.names = c("Proxima Nova", "Arial")
+    , table.font.size = "100%"
+    , row_group.font.weight = "bold"
+    , table.background.color = "#002A52"
+    , table.border.bottom.color = "#002A52"
+    , table.border.top.color = "#002A52"
+    , table_body.border.bottom.color = "#002A52"
+    , table_body.border.top.color = "#002A52"
+  ) %>% 
+  tab_header(title = md("**Cash reconciliation summary**")) %>% 
+  tab_style(style = list(
+    cell_text(align = "left")
+    , cell_borders(color = "#002A52")
+    )
+    , locations = cells_stub(rows = TRUE)
+  ) %>% 
+  tab_style(
+    style = list(
+      cell_borders(color = "#002A52")
+    )
+    , locations = cells_body()
+  ) %>%   
+  cols_label(amt = "Amount") %>% 
+  tab_style(style = list(
+    cell_text(weight = "bold")
+    , cell_borders(color = "#002A52")
+    )
+    , locations = cells_column_labels()) %>% 
+  fmt_currency(
+    columns = amt
+    , currency = "dollar"
+    , decimals = 0
+  )
+
+```
+
+<span style="color:white">The difference between the calculated cash closing balance and the closing balance per the bank statement is `r bs.rec_check`.</span>
+
+***  
+
+#### Paypal reconciliation
+<br>
+<span style="color:white">The purpose of this reconciliation is to check the itemised transactions reported by Paypal have been received to the bank account.</span>
+<br>
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+
+bank.paypal.rec %>% 
+  select(rpt_date, gross, fee, net, cr, checkCR) %>% 
+  mutate(fee = fee * -1) %>% 
+  gt(rowname_col = "rpt_date") %>% 
+  tab_options(
+    table.font.names = c("Proxima Nova", "Arial")
+    , table.font.size = "100%"
+    , row_group.font.weight = "bold"
+    , table.background.color = "#002A52"
+    , table.border.bottom.color = "#002A52"
+    , table.border.top.color = "#002A52"
+    , table_body.border.bottom.color = "#002A52"
+    , table_body.border.top.color = "#002A52"
+  ) %>% 
+  tab_header(title = md("**Paypal reconciliation**")) %>% 
+  tab_style(style = list(
+    cell_text(align = "left")
+    , cell_borders(color = "#002A52")
+    )
+    , locations = cells_stub(rows = TRUE)
+  ) %>% 
+  tab_style(
+    style = list(
+      cell_borders(color = "#002A52")
+    )
+    , locations = cells_body()
+  ) %>% 
+  cols_label(gross = "Gross Amount"
+             , fee = "Fees paid"
+             , net = "Net Amount"
+             , cr = "Received to bank"
+             , checkCR = "Difference") %>% 
+  fmt_currency(
+    columns = c("gross", "fee", "net", "cr", "checkCR")
+    , currency = "dollar"
+    , decimals = 0
+  )  
+
+```
+
+***  

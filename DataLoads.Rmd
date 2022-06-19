@@ -1,0 +1,264 @@
+---
+title: "Data Loads"
+output: html_notebook
+---
+
+```{r echo=FALSE, warning=FALSE, message=FALSE}
+
+source("C:/Users/Blake/Documents/CBVA/Finance/Utilities.R")
+
+```
+
+```{r prepReference, message=FALSE, warning=TRUE}
+
+membership.ref <- read_csv("C:/Users/Blake/Documents/CBVA/Finance/MAST/membership.csv")
+
+sales.ref <- read_csv("C:/Users/Blake/Documents/CBVA/Finance/MAST/sales.csv")
+
+juniors.ref <- tibble(map_cat = c("JNR_ONE", "JNR_TWO", "JNR_PROGRAM_FEE")
+                       , gross_fee = c(90, 160, 35)
+                       , efft_d = c(as.Date('2017-07-01')
+                                    , as.Date('2017-07-01')
+                                    , as.Date('2020-09-01'))
+                       , expy_d = c(as.Date('2099-12-31')
+                                    , as.Date('2099-12-31')
+                                    , as.Date('2099-12-31')))
+
+```
+
+***
+#### Load St George
+```{r loadBank}
+
+func_loadBank <- function(inputType, inputInternal) {
+  
+  # inputType = "tran"
+  # inputInternal = grepl.linked.acc
+
+  lastID <- func_getTibble(paste0("select coalesce(max(", inputType, "_id),0) as id from bank.", inputType)) %>% 
+    unlist()
+  
+  lastDate <- func_getTibble(paste0("select coalesce(max(", inputType, "_date)
+                                    , '", rpt.open - 2, "') as id from bank.", inputType)) %>% 
+    unlist()
+  
+  # Always get the latest file
+  data.file <- sort(list.files(paste0(rpt.fy, "/RAW/"), pattern = paste0(inputType, "*"), full.names = T)
+                  , decreasing = T)[1]
+  
+  data <- read_csv(data.file
+                 , col_names = c("date", "descr", "dr", "cr", "bal")
+                 , col_types = list(col_date(format = '%d/%m/%Y')
+                                    , col_character()
+                                    , col_double()
+                                    , col_double()
+                                    , col_double())
+                 , skip = 1
+                 , trim_ws = T) %>% 
+    filter(date > as.Date(lastDate, origin = '1970-01-01')) %>% 
+    group_by(date, bal) %>% 
+    mutate(id = row_number()) %>% 
+    ungroup() %>% 
+    mutate(id = cumsum(id) + lastID
+           , flagInternal = grepl(inputInternal, descr)
+           , flagInterest = grepl(grepl.interest, descr)
+           , flagRevSport = grepl(grepl.revsport, descr)
+           , map_cat_cr = case_when(
+             (flagInternal) ~ 'TRANSFER'
+             , (flagInterest) ~ 'INTEREST'
+             , (flagRevSport) ~ 'REVSPORT'
+           )
+           , map_cat_dr = if_else(!is.na(map_cat_cr), 'CASH_AT_BANK', as.character(NA))
+           # Fill in any obvious CASH_AT_BANK gaps
+           , map_cat_cr = if_else(is.na(map_cat_dr) & !is.na(dr), 'CASH_AT_BANK', map_cat_cr)
+           , map_cat_dr = if_else(is.na(map_cat_cr) & !is.na(cr), 'CASH_AT_BANK', map_cat_dr)
+           , rpt_perd = rpt.fy) %>% 
+    select(-matches("^flag*"))
+  
+  return(data)
+  
+}
+
+```
+
+##### Load Tran Acct
+```{r loadTran, message=FALSE}
+
+tran <- func_loadBank(inputType = "tran"
+                      , inputInternal = grepl.linked.acc) %>% 
+  rename(tran_date = date
+         , tran_id = id)
+
+tran %>% filter(is.na(map_cat_cr) | is.na(map_cat_dr)) %>% cb
+
+tran.manual <- read_csv("MAST/manual_tran.csv"
+                      , col_types = list(col_integer()
+                                         , col_character()
+                                         , col_character()))
+
+tran.final <- tran %>% 
+  left_join(tran.manual, by = c("tran_id")) %>% 
+  mutate(map_cat_cr = coalesce(map_cat_cr, man_cat_cr)
+         , map_cat_dr = coalesce(map_cat_dr, man_cat_dr)) %>% 
+  select(-man_cat_cr, -man_cat_dr)
+
+# Check whether all items have been classified
+ckTran <- tran.final %>% 
+  filter(is.na(map_cat_cr) | is.na(map_cat_dr)) %>% 
+  nrow()
+
+ckTran
+
+if (ckTran == 0) {
+  
+  dbWriteTable(conn = conn, name = c("bank", "tran"), value = tran.final, append = T, row.names = F)
+  print("Transaction data loaded")
+  
+} else {
+  
+  print("No transaction data loaded")  
+  tran.final %>% filter(is.na(map_cat)) %>% View
+  
+}
+
+```
+
+##### Load Save Acct
+```{r loadSave, message=FALSE}
+
+save <- func_loadBank(inputType = "save"
+                      , inputInternal = save.linked.acc) %>% 
+  rename(save_date = date
+         , save_id = id)
+
+save %>% filter(is.na(map_cat_cr) | is.na(map_cat_dr)) %>% View
+
+save.manual <- read_csv("MAST/manual_save.csv"
+                        , col_types = list(col_integer()
+                                           , col_character()
+                                           , col_character()))
+
+save.final <- save %>% 
+  left_join(save.manual, by = c("save_id")) %>% 
+  mutate(map_cat_cr = coalesce(map_cat_cr, man_cat_cr)
+         , map_cat_dr = coalesce(map_cat_dr, man_cat_dr)) %>% 
+  select(-man_cat_cr, -man_cat_dr)
+
+ckSave <- save.final %>% 
+  filter(is.na(map_cat_cr) | is.na(map_cat_dr)) %>% 
+  nrow()
+
+ckSave
+
+if (ckSave == 0) {
+
+  dbWriteTable(conn = conn, name = c("bank", "save"), value = save.final, append = T, row.names = F)
+  print("Savings data loaded")
+  
+} else {
+  
+  print("No savings data loaded")  
+  save.final %>% filter(is.na(map_cat)) %>% View
+  
+}
+
+```
+
+#### Load RevSport
+```{r}
+
+lastRevSport <- func_getTibble(paste0("select coalesce(max(transfer_id),0) as id from revsport.payments")) %>%
+  unlist()
+
+lastUnknown <- func_getTibble(paste0("select coalesce(max(id),0) as id from revsport.unknown")) %>%
+  unlist()
+
+revSport.file <- sort(list.files(paste0(rpt.fy, "/RAW/"), pattern = "rev_*", full.names = T), decreasing = T)[1]
+
+# Get the last  transfer ID from the database
+revsport.raw <- read_csv(revSport.file
+              , col_names = c("transfer_date", "source", "transfer_ref", "info", "amt")
+              , skip = 1) %>% 
+  filter(!transfer_date %in% c("Total", "Registration fees", "Class registrations"
+                               , "Registration upgrades", "Refunds/chargebacks")) %>% 
+  mutate(date_subtotal_f = str_detect(transfer_date, pattern = "[0-9]{4}-[0-9]{2}-[0-9]{2}")
+         , transfer_id = cumsum(date_subtotal_f)
+         , transfer_id = transfer_id + lastRevSport
+         , amt = as.numeric(str_replace_all(str_replace(str_replace_all(amt, "\\$", ""), "\\,", ""), "- ", "-")))
+
+revsport.payments <- revsport.raw %>% 
+  filter(date_subtotal_f) %>% 
+  mutate(transfer_date = lubridate::ymd(transfer_date)
+         , rpt_perd = rpt.fy) %>% 
+  select(transfer_id, transfer_ref, transfer_date, amt, rpt_perd)
+
+revsport.members <- revsport.raw %>% 
+  filter(!date_subtotal_f) %>% 
+  mutate(member_status = case_when(str_detect(transfer_ref, "^MU") ~ 'U'
+                                   , str_detect(info, "New Member$") ~ 'N'
+                                   , str_detect(info, "^New+") ~ 'N'
+                                   , str_detect(info, "^Renew+") ~ 'R'
+                                   , str_detect(info, "Renewal$") ~ 'R'
+                                   , str_detect(info, "New Member$") ~ 'N'
+                                   , str_detect(info, "^U/18+") ~ 'J')
+         , info = if_else(!is.na(member_status) & is.na(info), "31/12/9999", info)
+         , member_expiry = coalesce(lubridate::dmy(str_extract(info, "[0-9]{1,2}/[0-9]{1,2}/[0-9]{4}"))
+                                    , as.Date("9999-12-31"))) %>% 
+  filter(amt > 0) %>% 
+  # Exclude unknown transactions
+  filter(transfer_ref != '(Unknown)') %>% 
+  filter(!is.na(member_status)) %>% 
+  select(-source, -date_subtotal_f, -info) %>% 
+  rename(member_name = transfer_date
+         , transfer_parent_id = transfer_id)
+
+revsport.unknown <- revsport.raw %>% 
+  filter(transfer_ref == '(Unknown)') %>% 
+  mutate(incr = 1
+         , id = lastUnknown + cumsum(incr)) %>% 
+  select(id, transfer_ref, amt, transfer_id) %>% 
+  rename(transfer_parent_id = transfer_id)
+
+revsport.all_coaching <- revsport.raw %>% 
+  filter(!date_subtotal_f) %>% 
+  filter(transfer_ref != '(Unknown)') %>% 
+  filter(str_detect(transfer_ref, "(^MC|^MF)")) %>% 
+  select(-source, -date_subtotal_f) %>% 
+  rename(member_name = transfer_date
+         , transfer_parent_id = transfer_id)
+
+revsport.juniors <- revsport.all_coaching %>% 
+  mutate(jnr_f = case_when(str_detect(info, "(U [1-9]{1,2}|U[1-9]{1,2})") ~ 1)) %>% 
+  filter(!is.na(jnr_f)) %>% 
+  select(-jnr_f) %>% 
+  rename(player_name = member_name)
+
+# Now remove juniors from the main coaching table
+revsport.coaching <- revsport.all_coaching %>% 
+  filter(!transfer_ref %in% revsport.juniors$transfer_ref) %>% 
+  filter(amt > 0)
+
+revsport.refunds <- revsport.raw %>% 
+  filter(!date_subtotal_f) %>% 
+  filter(transfer_ref != '(Unknown)') %>% 
+  filter(amt < 0) %>% 
+  select(-source, -date_subtotal_f, -info) %>% 
+  rename(member_name = transfer_date
+         , transfer_parent_id = transfer_id)
+
+# Check the sum of the components to ensure no transactions are missed.
+round(sum(revsport.juniors$amt) + 
+  sum(revsport.members$amt) + 
+  sum(revsport.unknown$amt) +
+  sum(revsport.refunds$amt) + 
+  sum(revsport.coaching$amt) - 
+  sum(revsport.payments$amt), 2)
+
+dbWriteTable(conn = conn, name = c("revsport", "payments"), value = revsport.payments, append = T, row.names = F)
+dbWriteTable(conn = conn, name = c("revsport", "refunds"), value = revsport.refunds, append = T, row.names = F)
+dbWriteTable(conn = conn, name = c("revsport", "members"), value = revsport.members, append = T, row.names = F)
+dbWriteTable(conn = conn, name = c("revsport", "unknown"), value = revsport.unknown, append = T, row.names = F)
+dbWriteTable(conn = conn, name = c("revsport", "coaching"), value = revsport.coaching, append = T, row.names = F)
+dbWriteTable(conn = conn, name = c("revsport", "juniors"), value = revsport.juniors, append = T, row.names = F)
+
+```
