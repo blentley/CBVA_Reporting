@@ -200,7 +200,7 @@ revsport.members <- revsport.raw %>%
                                    , str_detect(info, "^Renew+") ~ 'R'
                                    , str_detect(info, "Renewal$") ~ 'R'
                                    , str_detect(info, "New Member$") ~ 'N'
-                                   , str_detect(info, "^U/18+") ~ 'J')
+                                   , str_detect(info, "U/18+") ~ 'J')
          , info = if_else(!is.na(member_status) & is.na(info), "31/12/9999", info)
          , member_expiry = coalesce(lubridate::dmy(str_extract(info, "[0-9]{1,2}/[0-9]{1,2}/[0-9]{4}"))
                                     , as.Date("9999-12-31"))) %>% 
@@ -244,7 +244,11 @@ revsport.refunds <- revsport.raw %>%
   filter(amt < 0) %>% 
   select(-source, -date_subtotal_f, -info) %>% 
   rename(member_name = transfer_date
-         , transfer_parent_id = transfer_id)
+         , transfer_parent_id = transfer_id) %>% 
+  group_by(member_name, transfer_ref, transfer_parent_id) %>% 
+  summarise(amt = sum(amt)) %>% 
+  ungroup() %>% 
+  select(member_name, transfer_ref, amt, transfer_parent_id)
 
 # Check the sum of the components to ensure no transactions are missed.
 round(sum(revsport.juniors$amt) + 

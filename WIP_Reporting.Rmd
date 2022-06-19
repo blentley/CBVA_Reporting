@@ -13,12 +13,12 @@ editor_options:
 
 <body style="background-color:#002A52;">
 
-```{r pressure, echo=FALSE, out.width = '35%', out.height='35%', fig.align='center'}
+```{r logo, echo=FALSE, out.width = '35%', out.height='35%', fig.align='center'}
 
 knitr::include_graphics("MAST/CBVA_logo.jpg")
 
 ```
-<h2><span style="color: white;">CBVA Financial Reporting FY22</span></h2>
+<h2><span style="color: white;">CBVA Financial Reporting FY23</span></h2>
 
 ```{css, echo=FALSE}
 h3
@@ -238,114 +238,6 @@ func_prepBankSave <- function(start_d, end_d) {
 
 save.consol_fs <- func_prepBankSave(start_d = rpt.open
                                     , end_d = rpt.curr)
-
-```
-
-```{r paypalTransactions, message=FALSE, warning=FALSE, echo=FALSE}
-
-func_prepPaypal <- function(inputBankTran) {
-
-  # Create a table of paypal transactions from the bank statement
-  bank.paypal <- inputBankTran %>% 
-    filter(map_cat_cr == "PAYPAL") %>% 
-    mutate(bank_ref_id = toupper(str_trim(str_replace_all(descr, grepl.paypal, "")))) 
-  
-  if (nrow(bank.paypal) > 0) {
-    
-    # Get a list of paypal reference IDs
-    bank.paypal.ref_id <- paste(bank.paypal$bank_ref_id, collapse = "', '")
-    
-    # Extract the corresponding detail from the paypal transaction listing
-    paypal.tran <- func_getTibble(paste0("
-      select pp_id 
-      , bank_ref_id
-      , pp_ts
-      , name
-      , gross
-      , net
-      , map_cat
-      , rpt_perd
-      from paypal.tran
-      where bank_ref_id in ('", bank.paypal.ref_id, "');")) %>% 
-      mutate(fee = gross - net)
-    
-    bank.paypal.tran <- bank.paypal %>%
-      rename(rpt_date = tran_date
-             , amt = cr) %>% 
-      select(rpt_date, bank_ref_id, amt) %>% 
-      left_join(paypal.tran %>% 
-                  select(pp_id, pp_ts, gross, net, fee, map_cat, bank_ref_id, rpt_perd)
-                , by = c("bank_ref_id")) %>% 
-      filter(map_cat != 'PAYPAL')
-    
-    # Perform a check on the join
-    bank.paypal.rec <- bank.paypal.tran %>% 
-      group_by(rpt_date, bank_ref_id) %>% 
-      summarise(gross = sum(gross)
-                , net = sum(net)
-                , fee = sum(fee)) %>% 
-      ungroup() %>% 
-      left_join(bank.paypal %>% 
-                  select(bank_ref_id, cr), by = c("bank_ref_id")) %>% 
-      mutate(checkCR = round(net - cr, 4))
-    
-    out.paypal <- bank.paypal.tran %>% 
-      select(rpt_date, pp_id, bank_ref_id, gross, fee, map_cat, rpt_perd) %>% 
-      gather("amt_type", "amt", -pp_id, -map_cat, -rpt_date, -bank_ref_id, -rpt_perd) %>% 
-      mutate(map_cat = if_else(amt_type == 'fee', 'TRAN_FEE', map_cat)
-             , amt = if_else(amt_type == 'fee', -amt, amt)) %>% 
-      rename(type = amt_type
-             , descr = bank_ref_id
-             , id = pp_id) %>% 
-      mutate(src_c = 'PAYPAL')
-    
-    pl.paypal <- out.paypal %>% 
-      mutate(fs_x = 'PL') %>% 
-      select(id, rpt_date, descr, amt, map_cat, rpt_perd, src_c, fs_x)
-    
-    bs.paypal <- out.paypal %>% 
-      mutate(fs_x = 'BS') %>% 
-      mutate(map_cat = 'CASH_AT_BANK') %>% 
-      select(id, rpt_date, descr, amt, map_cat, rpt_perd, src_c, fs_x)
-    
-    paypal.consol_fs <- pl.paypal %>% 
-      bind_rows(bs.paypal)
-    
-    rtn.list <- list(output = paypal.consol_fs
-                     , rec = bank.paypal.rec)
-    
-  } else {
-    
-    out.paypal <- tibble(id = as.double()
-                         , rpt_date = as.Date(NA)
-                         , descr = as.character()
-                         , amt = as.double()
-                         , map_cat = as.character()
-                         , rpt_perd = as.character()
-                         , src_c = as.character()
-                         , fs_x = as.character())
-    
-    bank.paypal.rec <- tibble(tran_date = as.Date(NA)
-                              , bank_ref_id = as.character()
-                              , gross = as.double()
-                              , net = as.double()
-                              , fee = as.double()
-                              , cr = as.double()
-                              , checkCR = as.double())
-    
-    rtn.list <- list(output = out.paypal
-                     , rec = bank.paypal.rec)
-    
-  }
-
-  return(rtn.list)
-  
-}
-
-rpt.paypal.rtn <- func_prepPaypal(inputBankTran = tran.raw_tran)
-
-paypal.consol_fs <- rpt.paypal.rtn$output
-bank.paypal.rec <- rpt.paypal.rtn$rec
 
 ```
 
@@ -590,7 +482,7 @@ manual.consol_fs <- manual.pl_cr %>%
   bind_rows(manual.pl_dr) %>% 
   bind_rows(manual.bs_cr) %>% 
   bind_rows(manual.bs_dr) %>% 
-  filter(rpt_date >= rpt.open & rpt_date <= rpt.close)
+  filter(rpt_date >= rpt.open & rpt_date <= rpt.curr)
 
 ```
 
@@ -601,7 +493,6 @@ manual.consol_fs <- manual.pl_cr %>%
 consol_fs <- tran.consol_fs %>% 
   bind_rows(save.consol_fs) %>% 
   bind_rows(revsport.consol_fs) %>% 
-  bind_rows(paypal.consol_fs) %>% 
   # Non-cash transactions
   bind_rows(manual.consol_fs)
 
@@ -616,7 +507,7 @@ pl.data <- consol_fs %>%
   left_join(cat.ref, by = c("map_cat", "fs_x"))
 
 # Save the PL like previous years
-write_csv(pl.data, "FY22/PROC/rpt_consol.csv", append = F, col_names = T)
+write_csv(pl.data, paste0(rpt.fy, "/PROC/rpt_consol.csv"), append = F, col_names = T)
 
 # Create a journal to transfer the PL result to the balance sheet
 pl.bs_transfer <- pl.data %>% 
@@ -959,19 +850,6 @@ gt(data = tbl_bs
   )  
 
 ```
-
-<br>
-<span style="color:white">**Additional Notes:**</span>
-<br>
-<span style="color:white">1. The Junior Support Fund was contributed to by Jesse van de Sande (Equipment Sub-committee), who generously donated the remainder of his honorarium after membership fee reimbursement. This was expensed before at year end supporting 4 participants in the Junior Program.</span>
-<br>
-<span style="color:white">2. Brand assets refer to CBVA undertaking a re-branding with the assistance of HutchTouch. These are historical costs paid for the re-branding, and not any valuation of our brand.</span>
-<br>
-<span style="color:white">3. The cost of the new trailer has been capitalised as an asset on Balance Sheet. It will be depreciated evenly over a 3 year life.</span>
-<br>
-<span style="color:white">4. Unearned fees refer to FY23 membership fees received prior to the new financial year.</span>
-<br>
-<span style="color:white">5. Accrued expenses refer to estimates of known costs, yet to be invoiced. The amount here refers to the amount outstanding to HutchTouch.</span>
 
 ***
 
