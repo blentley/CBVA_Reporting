@@ -591,7 +591,7 @@ if (bs.balance_check == 0) {
                         # Exclude the opening balance accounts
                         filter(rpt_date > rpt.open) %>% 
                         # Exclude zero balance records
-                        filter(amt != 0 & cum_amt != 0) %>% 
+                        filter(amt + cum_amt != 0) %>% 
                         select(rpt_date, map_cat, amt, cum_amt)
                       , append = T
                       , row.names = F)
