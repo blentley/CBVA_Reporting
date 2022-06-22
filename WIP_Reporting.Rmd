@@ -335,7 +335,7 @@ func_prepRevSport <- function(start_d, end_d) {
            , amt = tran_amt) %>% 
     filter(rpt_date >= start_d & rpt_date <= end_d)
   
-  coaching.consol <- tran.revsport %>% 
+  coaching.consol_full <- tran.revsport %>% 
     left_join(revsport.payments, by = c("transfer_id")) %>% 
     inner_join(revsport.coaching, by = c("transfer_id" = "transfer_parent_id")) %>% 
     left_join(revsport.refunds %>% 
@@ -350,8 +350,11 @@ func_prepRevSport <- function(start_d, end_d) {
     select(transfer_id, transfer_ref, tran_date, tran_amt, map_cat, rpt_perd, descr, src_c) %>% 
     rename(id = transfer_id
            , rpt_date = tran_date
-           , amt = tran_amt) %>% 
-    filter(rpt_date >= start_d & rpt_date <= end_d)
+           , amt = tran_amt) 
+    
+  coaching.consol <- coaching.consol_full %>% 
+    filter(rpt_date >= start_d & rpt_date <= end_d) %>% 
+    select(-transfer_ref)
   
   juniors.consol <- tran.revsport %>% 
     left_join(revsport.payments, by = c("transfer_id")) %>% 
@@ -380,7 +383,7 @@ func_prepRevSport <- function(start_d, end_d) {
   refunds.consol <- tran.revsport %>% 
     left_join(revsport.payments, by = c("transfer_id")) %>% 
     inner_join(revsport.refunds, by = c("transfer_id" = "transfer_parent_id")) %>% 
-    left_join(coaching.consol %>% 
+    left_join(coaching.consol_full %>% 
                 select(transfer_ref, map_cat) %>% 
                 rename(map_cat_coaching = map_cat)
               , by = c("transfer_ref" = "transfer_ref")) %>% 
@@ -395,8 +398,7 @@ func_prepRevSport <- function(start_d, end_d) {
     filter(rpt_date >= start_d & rpt_date <= end_d)
   
   revsport.tran <- bind_rows(members.consol
-            , coaching.consol %>% 
-              select(-transfer_ref)
+            , coaching.consol
             , juniors.consol
             , refunds.consol
             , unknown.consol) %>% 
@@ -528,7 +530,7 @@ pl.bs_transfer <- pl.data %>%
 bal.ob <- func_getTibble(paste0("
     select rpt_date
     , map_cat
-    , amt
+    , cum_amt
     from bal.map_cat
     where rpt_date = '", rpt.open - 1, "';"))
 
@@ -542,7 +544,8 @@ bs.data <- consol_fs %>%
 
 # Calculate the new closing balances for the period
 bal.cb <- bal.ob %>% 
-  select(rpt_date, map_cat, amt) %>% 
+  select(rpt_date, map_cat, cum_amt) %>%
+  rename(amt = cum_amt) %>% 
   # Append the changes
   bind_rows(bs.data) %>% 
   # Append the transfer from PL
@@ -617,7 +620,8 @@ bs.cab_change <- consol_fs %>%
 
 bs.cab_calc_cb <- bal.ob %>% 
   filter(map_cat == 'CASH_AT_BANK') %>% 
-  select(amt) %>% 
+  select(cum_amt) %>% 
+  rename(amt = cum_amt) %>% 
   bind_rows(bs.cab_change) %>% 
   summarise(amt = sum(amt)) %>% 
   mutate(lbl = 'Calculated closing balance')
@@ -625,7 +629,7 @@ bs.cab_calc_cb <- bal.ob %>%
 # Perform a bank reconciliation by comparing it
 # to the manually input amounts
 bs.rec <- bs.check %>% 
-  filter(!is.na(bank_tran)) %>% 
+  filter(rpt_id <= rpt.id) %>% 
   tail(1) %>% 
   mutate(amt = bank_tran + bank_save
          , lbl = 'Balance from bank statement') %>% 
@@ -633,6 +637,7 @@ bs.rec <- bs.check %>%
 
 bs.cab_summary <- bal.ob %>% 
   filter(map_cat == 'CASH_AT_BANK') %>% 
+  rename(amt = cum_amt) %>% 
   mutate(lbl = 'Opening balance') %>% 
   select(lbl, amt) %>% 
   bind_rows(bs.cab_change) %>% 
@@ -709,7 +714,7 @@ gt(data = tbl_pl
   ) %>% 
   tab_header(
     title = md("**CBVA Financial Peformance**")
-    , subtitle = md("*For the period 1 April 2021 to 31 March 2022*")) %>% 
+    , subtitle = md("*For the period 1 April 2022 to 31 March 2023*")) %>% 
   
   summary_rows(
     groups = "Income"
@@ -775,7 +780,7 @@ tbl_bs.ob <- bal.cb_accts %>%
 
 tbl_bs.cb <- bal.cb_accts %>% 
   filter(cum_amt != 0) %>% 
-  filter(rpt_date == rpt.close) %>% 
+  filter(rpt_date == rpt.curr) %>% 
   select(fs_cat, cat_lbl, cum_amt, sort_order) %>% 
   rename(Closing_Balance = cum_amt
          , fs_cat_cb = fs_cat)
@@ -785,6 +790,7 @@ tbl_bs <- tbl_bs.cb %>%
   full_join(tbl_bs.ob, by = c("cat_lbl")) %>% 
   mutate(fs_cat_cb = coalesce(fs_cat_cb, fs_cat_ob)
          , Opening_Balance = coalesce(Opening_Balance, 0)
+         , Closing_Balance = coalesce(Closing_Balance, 0)
          , Change = Closing_Balance - Opening_Balance) %>% 
   select(fs_cat_cb, cat_lbl, Opening_Balance, Closing_Balance, Change)
 
@@ -797,8 +803,8 @@ gt(data = tbl_bs
     )
     , locations = cells_stub(rows = TRUE)
   ) %>% 
-  cols_label(Opening_Balance = "31 March 21"
-             , Closing_Balance = "31 March 22") %>% 
+  cols_label(Opening_Balance = rpt.open - 1
+             , Closing_Balance = rpt.curr) %>% 
   tab_style(style = list(
     cell_text(weight = "bold")
     , cell_borders(color = "#002A52")
@@ -931,12 +937,12 @@ if (rpt.monthly.result < 0) {
 func_plotTornado(inputData = rpt.monthly.data
                , inputTitle = paste0("Monthly income and expenses for ", rpt.mnth.full, " ", year(rpt.curr))
                , inputSubtitle = paste0("Net result: ", rpt.monthly.result)
-               , inputLimits = c(-7500, 7500))
+               , inputLimits = c(-8000, 8000))
 
 ```
 
 #### Year to date performance
-```{r ytdPL, fig.width=9, fig.height=10, echo=FALSE, warning=FALSE, message=FALSE}
+```{r ytdPL, fig.width=9, fig.height=10, echo=FALSE, warning=FALSE, message=FALSE, eval=TRUE}
 
 rpt.ytd.data <- pl.data %>% 
   func_prepTornado()
@@ -963,7 +969,7 @@ func_plotTornado(inputData = rpt.ytd.data
 ***  
 
 #### Monthly performance
-```{r rptMonthByMonth, fig.width=9, fig.height=6, echo=FALSE, eval=TRUE, warning=FALSE, message=FALSE}
+```{r rptMonthByMonth, fig.width=9, fig.height=6, echo=FALSE, eval=TRUE, warning=FALSE, message=FALSE, eval=FALSE}
 
 rpt.monthly <- pl.data %>% 
   # Exclude transfers and assign other exclusions as either income or expenses
@@ -1029,12 +1035,22 @@ ggplot() +
 ```{r hisPerformance, fig.width=9, fig.height=8, echo=FALSE, warning=FALSE, message=FALSE}
 
 # Load externally saved reports
-py.consol <- read_csv("FY21/PROC/rpt_consol.csv")
-ppy.consol <- read_csv("FY20/PROC/rpt_consol.csv")
-pppy.consol <- read_csv("FY19/PROC/rpt_consol.csv")
-
-cy.consol <- pl.data %>% 
-  select(rpt_perd, map_cat, amt)
+loop <- 1
+for (i in 19:as.integer(str_sub(rpt.fy, 3, 4))) {
+  
+  perd <- paste0("FY", i)
+  hist.data <- read_csv(paste0(perd, "/PROC/rpt_consol.csv"))
+  
+  if (loop == 1) {
+    hist.consol <- hist.data
+  } else {
+    hist.consol <- hist.data %>% 
+      bind_rows(hist.consol)
+  }
+  
+  loop <- loop + 1
+  
+}
 
 sel.cat_lbl <- c('Adult Renewed membership'
   , 'Adult New membership'
@@ -1045,13 +1061,9 @@ sel.cat_lbl <- c('Adult Renewed membership'
   , 'Jnr program expenses'
   , 'Squad program expenses')
 
-hist.consol <- bind_rows(py.consol
-                         , ppy.consol
-                         , pppy.consol) %>%
+hist.trends <- hist.consol %>%
   # Re-map equipment to the new expense label
   mutate(map_cat = if_else(map_cat == 'EQUIPMENT', 'EQUIPMENT_EXP', map_cat)) %>% 
-  # Append the current year results
-  bind_rows(cy.consol) %>% 
   select(rpt_perd, map_cat, amt) %>% 
   left_join(cat.ref %>% select(map_cat, cat_lbl, fs_cat)
             , by = c("map_cat")) %>% 
@@ -1078,7 +1090,7 @@ hist.consol <- bind_rows(py.consol
                           , labels = sel.cat_lbl
                           , ordered = TRUE))
 
-ggplot(hist.consol, aes(x = rpt_perd, y = amt, fill = fs_cat)) +
+ggplot(hist.trends, aes(x = rpt_perd, y = amt, fill = fs_cat)) +
   geom_bar(stat = "identity", show.legend = F) +
   geom_text(aes(label = lbl, colour = fs_cat)
             , nudge_y = 1250
@@ -1099,7 +1111,7 @@ ggplot(hist.consol, aes(x = rpt_perd, y = amt, fill = fs_cat)) +
 ***  
 
 #### Monthly cash balance
-```{r plotCashBalance, fig.width=9, fig.height=5, echo=FALSE, warning=FALSE, message=FALSE}
+```{r plotCashBalance, fig.width=9, fig.height=5, echo=FALSE, warning=FALSE, message=FALSE, eval=FALSE}
 
 cab.py <- func_getTibble(paste0("
   select rpt_date
@@ -1119,7 +1131,7 @@ cab.py <- func_getTibble(paste0("
 # Plot monthly cash balance
 cab.monthly <- bal.ob %>% 
   filter(map_cat == 'CASH_AT_BANK') %>% 
-  select(amt) %>% 
+  select(cum_amt) %>% 
   mutate(rpt_id = 0) %>% 
   bind_rows(
     bs.check %>% 
@@ -1194,7 +1206,7 @@ ggplot(cab.lt, aes(x = rpt_date, y = amt)) +
              , colour = "#CDB98F"
              , size = 3.75) +
   geom_text(data = cab.lt_last, aes(x = rpt_date, y = amt, label = lbl)
-            , nudge_y = 3000
+            , nudge_y = -3000
             , size = 3.25, colour = "#CDB98F", fontface = "bold") +
   scale_y_continuous(limits = c(0, NA), labels = scales::comma) +
   ggtitle("Long term monthly cash balance"
@@ -1206,7 +1218,7 @@ ggplot(cab.lt, aes(x = rpt_date, y = amt)) +
 
 ### Detailed Breakdowns {.tabset .tabset-fade .tabset-pills}
 #### Junior Program
-```{r junior_detail, echo=FALSE, warning=FALSE, message=FALSE}
+```{r junior_detail, echo=FALSE, warning=FALSE, message=FALSE, eval=FALSE}
 
 jnr.rpt <- pl.data %>% 
   filter(str_detect(map_cat, "JNR*")) %>% 
@@ -1306,7 +1318,7 @@ gt(jnr.rpt
 ***  
 
 #### Squad Program
-```{r squad_detail, echo=FALSE, warning=FALSE, message=FALSE}
+```{r squad_detail, echo=FALSE, warning=FALSE, message=FALSE, eval=FALSE}
 
 squad.rpt <- pl.data %>% 
   filter(str_detect(map_cat, "SQUAD_*")) %>% 
@@ -1406,7 +1418,7 @@ gt(squad.rpt
 ***  
 
 #### Administration costs
-```{r admin_detail, echo=FALSE, warning=FALSE, message=FALSE}
+```{r admin_detail, echo=FALSE, warning=FALSE, message=FALSE, eval=FALSE}
 
 admin.breakdown <- read_csv("FY22/PROC/admin_breakdown.csv")
 
@@ -1528,53 +1540,5 @@ gt(bs.cab_summary
 ```
 
 <span style="color:white">The difference between the calculated cash closing balance and the closing balance per the bank statement is `r bs.rec_check`.</span>
-
-***  
-
-#### Paypal reconciliation
-<br>
-<span style="color:white">The purpose of this reconciliation is to check the itemised transactions reported by Paypal have been received to the bank account.</span>
-<br>
-```{r echo=FALSE, message=FALSE, warning=FALSE}
-
-bank.paypal.rec %>% 
-  select(rpt_date, gross, fee, net, cr, checkCR) %>% 
-  mutate(fee = fee * -1) %>% 
-  gt(rowname_col = "rpt_date") %>% 
-  tab_options(
-    table.font.names = c("Proxima Nova", "Arial")
-    , table.font.size = "100%"
-    , row_group.font.weight = "bold"
-    , table.background.color = "#002A52"
-    , table.border.bottom.color = "#002A52"
-    , table.border.top.color = "#002A52"
-    , table_body.border.bottom.color = "#002A52"
-    , table_body.border.top.color = "#002A52"
-  ) %>% 
-  tab_header(title = md("**Paypal reconciliation**")) %>% 
-  tab_style(style = list(
-    cell_text(align = "left")
-    , cell_borders(color = "#002A52")
-    )
-    , locations = cells_stub(rows = TRUE)
-  ) %>% 
-  tab_style(
-    style = list(
-      cell_borders(color = "#002A52")
-    )
-    , locations = cells_body()
-  ) %>% 
-  cols_label(gross = "Gross Amount"
-             , fee = "Fees paid"
-             , net = "Net Amount"
-             , cr = "Received to bank"
-             , checkCR = "Difference") %>% 
-  fmt_currency(
-    columns = c("gross", "fee", "net", "cr", "checkCR")
-    , currency = "dollar"
-    , decimals = 0
-  )  
-
-```
 
 ***  

@@ -61,7 +61,6 @@ py.dates <- tibble(curr = seq(py.open, length = 13, by = "months") - 1) %>%
 
 # Set Reporting Month
 rpt.id <- bs.check %>% filter(!is.na(bank_tran)) %>% summarise(id = max(rpt_id)) %>% unlist()
-rpt.id <- 1
 
 rpt.curr <- rpt.dates$curr[rpt.id]
 rpt.prev <- rpt.dates$prev[rpt.id]

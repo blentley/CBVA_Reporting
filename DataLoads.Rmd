@@ -69,6 +69,9 @@ func_loadBank <- function(inputType, inputInternal) {
              , (flagRevSport) ~ 'REVSPORT'
            )
            , map_cat_dr = if_else(!is.na(map_cat_cr), 'CASH_AT_BANK', as.character(NA))
+           # Make a correction for transfers - they need to offset each other
+           , map_cat_dr = if_else(map_cat_cr == 'TRANSFER', 'TRANSFER', map_cat_dr)
+           , map_cat_cr = if_else(map_cat_dr == 'TRANSFER', 'TRANSFER', map_cat_cr)
            # Fill in any obvious CASH_AT_BANK gaps
            , map_cat_cr = if_else(is.na(map_cat_dr) & !is.na(dr), 'CASH_AT_BANK', map_cat_cr)
            , map_cat_dr = if_else(is.na(map_cat_cr) & !is.na(cr), 'CASH_AT_BANK', map_cat_dr)
