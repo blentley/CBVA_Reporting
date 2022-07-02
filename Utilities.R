@@ -14,9 +14,13 @@ library(gt)
 options(scipen = 999)
 
 # Set the opening balance 
+# FY23
+tran.ob <- 3551.59
+save.ob <- 37532.69
+
 # FY22
-tran.ob <- 910.41
-save.ob <- 43323.57
+# tran.ob <- 910.41
+# save.ob <- 43323.57
 
 # FY21
 # tran.ob <- 681.37
@@ -27,9 +31,9 @@ save.ob <- 43323.57
 #save.ob <- 26316.85
 
 # Set the report starting date
-rpt.open <- as.Date('2021-04-01', origin = '1970-01-01')
-rpt.close <- as.Date('2022-03-31', origin = '1970-01-01')
-rpt.fy <- "FY22"
+rpt.open <- as.Date('2022-04-01', origin = '1970-01-01')
+rpt.close <- as.Date('2023-03-31', origin = '1970-01-01')
+rpt.fy <- "FY23"
 
 py.open <- zoo::as.Date(zoo::as.yearmon(rpt.open) - 1, frac = 0)
 py.close <- zoo::as.Date(zoo::as.yearmon(rpt.close) - 1, frac = 0) 
@@ -185,9 +189,8 @@ save.linked.acc <- "*0000455800733*"
 map_admin.raw <- read_csv("C:/Users/Blake/Documents/CBVA/Finance/MAST/map_admin.csv")
 map_equip.raw <- read_csv("C:/Users/Blake/Documents/CBVA/Finance/MAST/map_equip.csv")
 
-cb <- function(df, sep="\t", dec=",", max.size=(200*1000)) {
+cb <- function(df) {
   
-  # Copy a data.frame to clipboard
-  write.table(df, paste0("clipboard-", formatC(max.size, format="f", digits=0)), sep=sep, row.names=FALSE, dec=dec)
+  clipr::write_clip(df)
 
 }
